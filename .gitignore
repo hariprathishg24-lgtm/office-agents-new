@@ -1,0 +1,14 @@
+node_modules/
+dist/*
+!dist/command-centre-v2.html
+data/
+office.config.local.json
+office.agents.local.json
+brain/Agents Office/
+.DS_Store
+*.backup-*
+# the brain keeps its own history (brain-git.mjs) - never nest it in the source repo
+brain/
+_archive/
+logs/
+test/.tmp/

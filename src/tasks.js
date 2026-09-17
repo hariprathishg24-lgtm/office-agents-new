@@ -735,7 +735,9 @@ export function initTasks(ctx) {
   function apply(t, st) {
     if (st.state === 'doing' && t.state !== 'doing') {
       t.state = 'doing'; t.startedAt = performance.now() - Math.max(0, Date.now() - (st.startedAt || Date.now())); t.progress = 0; t.pausedAt = null; t.running = true; t.ready = false; t.srv = true; t.changedAt = st.startedAt || Date.now(); touch(t, 'started');
-    } else if (st.state === 'waiting' && t.draftAt !== st.waitingAt) { // a new draft is waiting for the OK (the first, or a rework after REJECT)
+    } else if (st.state === 'next' && t.state === 'doing' && !(t.claimedAt && Date.now() - t.claimedAt < 15000)) { // the server restarted mid-run and put it back in the queue
+      t.state = 'next'; t.running = false; t.ready = false; t.progress = 0; t.changedAt = Date.now(); dirty = true;
+    } else if (st.state === 'waiting' && (t.draftAt !== st.waitingAt || (t.state !== 'waiting' && !(t.claimedAt && Date.now() - t.claimedAt < 15000)))) { // a draft is waiting for the OK (the first, a rework after REJECT, or one handed back because the send never started)
       copyResult(t, st); t.state = 'waiting'; t.draftAt = st.waitingAt; t.ask = st.ask; t.changedAt = st.waitingAt || Date.now(); t.running = true; touch(t, 'waiting');
       askApproval(t);
     } else if (st.state === 'done' && t.state !== 'done') {
@@ -754,7 +756,10 @@ export function initTasks(ctx) {
   const pendingFeedback = {}; // agentId → sid after REJECT: the owner's next chat line is the note
   function resolveLive(agentId, approved) { // APPROVE / REJECT on a live draft (main.js calls this instead of the demo onResolve)
     const t = tasks.find(x => x.live && x.agent === agentId && x.state === 'waiting'); if (!t) return false;
-    if (approved) { post(`/tasks/${t.sid}/approve`); toDoing(t); chatPush(agentId, { who: 'agent', text: '✓ Approved — sending it now. It lands here when it is done.' }); }
+    if (approved) { // the approval names the draft the owner saw: if the server has a newer one, it refuses
+      toDoing(t); chatPush(agentId, { who: 'agent', text: '✓ Approved — sending it now. It lands here when it is done.' });
+      post(`/tasks/${t.sid}/approve`, { waitingAt: t.draftAt }).then(j => { if (j && j.ok) return; chatPush(agentId, { who: 'agent', text: `Not sent — ${j && j.error ? j.error : 'the office did not answer'}.` }); t.claimedAt = 0; poll(); });
+    }
     else { pendingFeedback[agentId] = t.sid; chatPush(agentId, { who: 'agent', text: 'Understood. What should change? Tell me here and I will redo it — it comes back for your OK.' }); }
     return true;
   }
@@ -762,17 +767,22 @@ export function initTasks(ctx) {
   function rejectLive(agentId, feedback) {
     const sid = pendingFeedback[agentId]; delete pendingFeedback[agentId];
     const t = tasks.find(x => x.live && x.sid === sid); if (!t) return false;
-    post(`/tasks/${sid}/reject`, { feedback }); toDoing(t); chatPush(agentId, { who: 'agent', text: 'On it — reworking it with your note. It comes back here for your OK.' });
+    post(`/tasks/${sid}/reject`, { feedback }).then(j => { if (j && j.ok) return; chatPush(agentId, { who: 'agent', text: `Could not send it back — ${j && j.error ? j.error : 'the office did not answer'}.` }); t.claimedAt = 0; poll(); }); toDoing(t); chatPush(agentId, { who: 'agent', text: 'On it — reworking it with your note. It comes back here for your OK.' });
     return true;
   }
-  function toDoing(t) { t.state = 'doing'; t.startedAt = performance.now(); t.progress = 0; t.pausedAt = null; t.running = true; t.ready = false; t.srv = true; touch(t, 'started'); }
+  function toDoing(t) { t.claimedAt = Date.now(); t.state = 'doing'; t.startedAt = performance.now(); t.progress = 0; t.pausedAt = null; t.running = true; t.ready = false; t.srv = true; touch(t, 'started'); }
   // LIVE: the agent picks the task up → Claude does it on the server → the result lands in the chat
   async function runLive(t, feedback) {
     t.running = true; t.ready = false;
     try {
-      const r = await fetch(`${API}/tasks/${t.sid}/${feedback ? 'revise' : 'run'}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(feedback ? { feedback } : {}) });
+      t.claimedAt = Date.now();
+      let r;
+      try { r = await fetch(`${API}/tasks/${t.sid}/${feedback ? 'revise' : 'run'}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(feedback ? { feedback } : {}) }); }
+      catch (e) { t.claimedAt = 0; console.warn('office: lost the connection while it ran — the server keeps going; the poll picks the result up:', e.message); return; } // not a failure: the work is still running on the server
+      if (r.status === 409) { t.claimedAt = 0; poll(); return; } // already running (another tab, the clock) or already moved on: follow the server, never start a second run
       if (!r.ok) throw new Error((await r.json()).error || r.statusText);
       const st = await r.json();
+      if (st.state === 'waiting') { t.claimedAt = 0; apply(t, st); return; } // outbound work drafts first: it waits for the OK instead of landing as done
       t.result = st.result; t.error = !!st.error; t.read = st.read || []; t.note = st.note; t.tools = st.tools || []; t.used = st.used || []; if (st.modelUsed) { t.modelUsed = st.modelUsed; t.modelFrom = st.modelFrom; t.effortUsed = st.effortUsed || ''; t.effortFrom = st.effortFrom; }
       usageDue = true;
       if (t.tools.length && onTools) onTools(t.agent, t.tools); // the connectors the agent really pulled on light up

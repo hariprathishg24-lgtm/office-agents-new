@@ -10,8 +10,7 @@
 //   allow  — empty = every connected server; otherwise only these (name, id or key)
 //   deny   — servers the agents may see in the bar but never call
 //   departments — which pods a server is wired to (default: a built-in map, else every pod)
-import { spawn } from 'node:child_process';
-import { claudeBin } from './claude-bin.mjs';
+import { claudeBin, spawnClaude } from './claude-bin.mjs';
 
 export const DEPT_KEYS = ['emails', 'sales', 'marketing', 'ops', 'fin', 'delivery', 'creative', 'success', 'risk', 'growth', 'exec',
   'eng', 'data', 'pmo', 'people', 'legal', 'support', 'procure', 'expand', 'product'];
@@ -87,7 +86,7 @@ export function discover({ timeout = 45000 } = {}) {
     let out = '', done = false;
     const finish = list => { if (done) return; done = true; if (list) { servers = list; discoveredAt = Date.now(); } resolve(servers); };
     let p;
-    try { p = spawn(claudeBin(cfgMcp.__cfg || {}) || 'claude', ['mcp', 'list'], { env, stdio: ['ignore', 'pipe', 'pipe'] }); } catch { return finish([]); }
+    try { p = spawnClaude(claudeBin(cfgMcp.__cfg || {}), ['mcp', 'list'], { env, stdio: ['ignore', 'pipe', 'pipe'] }); } catch { return finish([]); }
     const timer = setTimeout(() => { try { p.kill('SIGKILL'); } catch {} finish(parseList(out)); }, timeout);
     p.stdout.on('data', d => { out += d; }); p.stderr.on('data', d => { out += d; });
     p.on('error', () => { clearTimeout(timer); finish([]); });

@@ -18,6 +18,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, nextRun, valid } from './src/when.js';
+import { writeJSON } from './store.mjs';
 
 // V4: every department may hold a routine. Upstream staged this by release (Emails, Accounting,
 // Sales first); this fork is a self-running agency, so the acquisition engine — prospecting,
@@ -91,7 +92,7 @@ export function save(brainPath, routines) {
 
 /* ---------- run state: data/routines.json → { [id]: { nextAt, lastAt, runs, lastTaskId } } ---------- */
 export const loadState = dataDir => readJSON(stateFile(dataDir), {});
-export function saveState(dataDir, st) { fs.mkdirSync(dataDir, { recursive: true }); fs.writeFileSync(stateFile(dataDir), JSON.stringify(st, null, 2)); }
+export function saveState(dataDir, st) { fs.mkdirSync(dataDir, { recursive: true }); writeJSON(stateFile(dataDir), st); }
 
 /** Give every routine a nextAt (new ones: the next due time from now). Returns the merged view the API serves. */
 export function withState(routines, st, now = Date.now()) {

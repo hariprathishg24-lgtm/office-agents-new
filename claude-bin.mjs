@@ -11,7 +11,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 
 const EXT_ROOTS = [
   ['.vscode', 'extensions'], ['.vscode-insiders', 'extensions'], ['.vscode-server', 'extensions'],
@@ -52,6 +52,12 @@ export function claudeBin(cfg = {}) {
   const explicit = process.env.AO_CLAUDE || cfg.claudePath;
   if (explicit && fs.existsSync(explicit)) return (cached = explicit);
   return (cached = onPath() || bundled() || null);
+}
+/** Spawn the CLI. A .mjs/.js "binary" (the tests' fake Claude, via AO_CLAUDE) runs under this Node,
+ *  because Windows cannot execute a script file directly. */
+export function spawnClaude(bin, args, opts) {
+  if (/\.(mjs|cjs|js)$/i.test(bin || '')) return spawn(process.execPath, [bin, ...args], opts);
+  return spawn(bin || 'claude', args, opts);
 }
 /** How the office found it, for the boot banner. */
 export function claudeSource(cfg = {}) {

@@ -1,0 +1,52 @@
+// A stand-in for the Claude Code CLI, for the reliability tests. It speaks the same stream-json the
+// office reads, never touches the network, and appends one line per call to $FAKE_LOG so a test can
+// count exactly how many runs — and how many sends — happened.
+//
+// Behaviour is chosen by a marker in the owner's request text:
+//   [fake:slow]      sleeps past any test deadline          [fake:error]    result with is_error
+//   [fake:exit]      partial output, then exit 3            [fake:empty]    exit 0 with no result
+//   [fake:sendfail]  (approve) calls a tool, then dies      [fake:prefail]  (approve) dies before any tool
+//   [fake:wait=N]    takes N ms
+// A request containing "send" or "email" is routed as needs_ok: true.
+import fs from 'node:fs';
+
+const args = process.argv.slice(2);
+const log = entry => { if (process.env.FAKE_LOG) fs.appendFileSync(process.env.FAKE_LOG, JSON.stringify({ at: Date.now(), ...entry }) + '\n'); };
+const emit = obj => process.stdout.write(JSON.stringify(obj) + '\n');
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+if (args[0] === 'mcp') { console.log('No MCP servers configured.'); process.exit(0); }
+
+const sysAt = args.indexOf('--system-prompt-file');
+const system = sysAt >= 0 ? fs.readFileSync(args[sysAt + 1], 'utf8') : '';
+let input = '';
+process.stdin.on('data', d => { input += d; });
+process.stdin.on('end', async () => {
+  let user = '';
+  try { user = JSON.parse(input.split('\n')[0]).message.content.filter(b => b.type === 'text').map(b => b.text).join('\n'); } catch {}
+  const mode = /You are the router/.test(system) ? 'router' : /The owner has APPROVED/.test(user) ? 'approve' : /asked for changes/.test(user) ? 'rework' : /judged read-only/.test(user) ? 'readonly' : /send, post, pay or change NOTHING/.test(user) ? 'draft' : 'other';
+  const marker = (user.match(/\[fake:([a-z]+)(?:=(\d+))?\]/) || []);
+  const request = (user.match(/Owner's request: "?([^\n]*)/) || [])[1] || '';
+  log({ mode, marker: marker[1] || '', request, systemChars: system.length, probe: process.env.FAKE_PROBE ? system.includes(process.env.FAKE_PROBE) : undefined });
+  emit({ type: 'system', subtype: 'init', mcp_servers: [], tools: [] });
+
+  if (mode === 'router') {
+    const needs = /send|email/i.test(request);
+    emit({ type: 'result', subtype: 'success', is_error: false, result: JSON.stringify({ agent: 'lexi', title: request.slice(0, 60) || 'Task', plan: ['one'], eta_minutes: 5, why: 'fake', needs_ok: needs }) });
+    return process.exit(0);
+  }
+  if (marker[1] === 'wait') await sleep(+marker[2] || 500);
+  if (marker[1] === 'slow') { emit({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'mcp__apollo__search' }] } }); await sleep(60000); }
+  if (marker[1] === 'error') { emit({ type: 'result', subtype: 'error_during_execution', is_error: true, result: 'API Error: overloaded' }); return process.exit(0); }
+  if (marker[1] === 'exit') { emit({ type: 'assistant', message: { content: [{ type: 'text', text: 'half a draft' }] } }); process.stderr.write('boom\n'); return process.exit(3); }
+  if (marker[1] === 'empty') return process.exit(0);
+  if (mode === 'approve') {
+    if (marker[1] === 'prefail') { process.stderr.write('auth expired\n'); return process.exit(1); }
+    emit({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 's1', name: 'mcp__claude_ai_Gmail__send_message' }] } });
+    log({ mode: 'SEND', request });
+    if (marker[1] === 'sendfail') { await sleep(50); return process.exit(1); }
+    emit({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 's1', is_error: false }] } });
+  }
+  emit({ type: 'result', subtype: 'success', is_error: false, result: `FAKE ${mode} for: ${request}`, usage: { input_tokens: 1, output_tokens: 1 } });
+  process.exit(0);
+});

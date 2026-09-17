@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased — reliability (17 Sep 2026)
+
+Phases 0–2 of the reliability handoff, plus the prompt-honesty part of Phase 3 and the local-access part of Phase 8. `npm test` (19 checks, fake Claude, throwaway state) proves each item below.
+
+- **Approval survives routing.** A task typed into the bar keeps the router's `needsOk`. Anything that sends, posts, pays or changes something drafts first and waits in WAITING ON APPROVAL, like a routine. Read-only tasks are told they are read-only.
+- **One run per request.** Run, revise, approve and reject claim the task on the server before anything starts. Two clicks, two tabs, or the page and the clock asking at once give one Claude run; the rest get 409 "already running". Every run is recorded in `attempts`.
+- **An approval is for one draft.** The draft's hash is frozen when you approve. A rework needs a new approval, an approve naming an older draft is refused, and a draft edited on disk cannot be approved.
+- **A failed send is never silently repeated.** If a send fails before the agent calls any tool, nothing went out and the draft goes back to waiting. If it fails after, the task is marked OUTCOME UNKNOWN (`needsCheck`) and cannot be approved or revised again until you check.
+- **Errors are errors.** A result flagged `is_error`, a nonzero exit or a run with no result now fails, and any partial text is kept but not delivered. A timeout names what the agent was last doing ("calling Apollo"). A broken stdin no longer crashes the office.
+- **The whole price list reaches the agent.** The system prompt goes to the CLI as a file (`--system-prompt-file`), so the Windows 32,767-character limit no longer cuts notes. Six of the eight core notes were being cut (the price list, ICP, services, rules) while the prompt called them "complete". Notes now go in whole, and any cut is labelled `[CUT]`.
+- **Safe storage.** `data/tasks.json`, routine state and usage state are written atomically, with the previous copy kept as `.bak`. A damaged file is kept, reported, and never overwritten with an empty list.
+- **Restart recovery.** On boot, routine tasks waiting to run go back in the queue. Interrupted read-only work is picked up again (at most 3 attempts in total). An interrupted send goes back to waiting if it had not started, or is marked OUTCOME UNKNOWN if it had.
+- **Filing is not the work.** If the note cannot be saved, the task stays done with `filed: failed`.
+- **This machine only.** The server listens on 127.0.0.1 (`AO_HOST` to change). Posts from other websites and foreign Host headers get 403.
+- **Launcher.** `start-office.cmd` checks that an office actually answers on 4520 and restarts crashes with backoff (up to 5 quick restarts). The log is capped at 5 MB. Its comment no longer claims a Scheduled Task that was never registered.
+- **Checks never touch real state.** `npm run check` runs its server with a scratch data folder and the clock off. The tests use `AO_DATA`, `AO_BRAIN`, `AO_CLAUDE` (a fake CLI), `AO_CLOCK=off`, `AO_USAGE=off`, `AO_TIMEOUT_MS`.
+- A folder named like a note inside `Agents Office/` no longer makes every task fail. Notes record the model that did the work, not the first model the CLI listed.
+
 ## 3.6.1-beta.1 — 9 Sep 2026
 
 - **A bigger task box.** The bar is two rows now: the department and the text on top, the model menu, REPEAT and ADD underneath, so the text runs the width of the panel. The box grows as you type, up to six lines, then scrolls. Enter adds; Shift+Enter is a new line.

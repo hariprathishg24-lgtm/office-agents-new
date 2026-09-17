@@ -6,6 +6,7 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { loadConfig, ROOT } from './config.mjs';
 
 const results = [];
@@ -332,10 +333,13 @@ else {
 /* ---------- 3. server smoke ---------- */
 {
   const port = 4600 + Math.floor(Math.random() * 300);
-  const env = { ...process.env, PORT: String(port) };
+  // Its own data folder and no clock: the smoke test must never fire the owner's routines or write
+  // over data/tasks.json. (CHECK_LIVE still runs real Claude calls, against this scratch state.)
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ao-check-'));
+  const env = { ...process.env, PORT: String(port), AO_DATA: scratch, AO_CLOCK: LIVE ? 'on' : 'off' };
   const srv = spawn('node', ['serve.mjs'], { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let log = ''; srv.stdout.on('data', d => { log += d; }); srv.stderr.on('data', d => { log += d; });
-  const base = `http://localhost:${port}`;
+  const base = `http://127.0.0.1:${port}`;
   const up = await (async () => { for (let i = 0; i < 40; i++) { try { const r = await fetch(base + '/api/health'); if (r.ok) return await r.json(); } catch {} await new Promise(r => setTimeout(r, 250)); } return null; })();
   if (!up) bad('server: starts', log.trim().split('\n').slice(-2).join(' | ') || 'no health response');
   else {
@@ -449,6 +453,7 @@ else {
     } else ok('live: skipped', 'set CHECK_LIVE=1 to route one task and one chat through Claude');
   }
   srv.kill();
+  try { fs.rmSync(scratch, { recursive: true, force: true }); } catch {}
 }
 
 /* ---------- summary ---------- */

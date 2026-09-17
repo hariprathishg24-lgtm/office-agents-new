@@ -28,6 +28,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { loadConfig, ROOT } from './config.mjs';
@@ -42,19 +43,24 @@ import * as routines from './routines.mjs';
 import * as usage from './usage.mjs';
 import { normModel, modelFor, modelArgs, modelId, modelName, MODEL_KEYS, DEFAULT_MODEL, normEffort, effortFor, effortName, EFFORT_KEYS } from './src/models.js';
 import { parseWhen, describe, valid as validWhen, untilText } from './src/when.js';
-import { claudeBin, claudeSource } from './claude-bin.mjs';
+import { claudeBin, claudeSource, spawnClaude } from './claude-bin.mjs';
+import { readJSON, writeJSON, StoreError } from './store.mjs';
 import * as brainGit from './brain-git.mjs';
 import { scrub } from './scrub.mjs';
 
 const cfg = loadConfig();
 const HTML = path.join(ROOT, 'dist', 'command-centre-v2.html'); // built by build.mjs; shipped so npm start works without a build
-const DATA = path.join(ROOT, 'data');
+const DATA = process.env.AO_DATA ? path.resolve(process.env.AO_DATA) : path.join(ROOT, 'data'); // AO_DATA: the tests and npm run check keep their state away from the real office
 const FILE = path.join(DATA, 'tasks.json');
 const BRAIN = cfg.brainPath;
 const NOTES_DIR = path.join(BRAIN, 'Agents Office');
 const CLI_CWD = path.join(os.tmpdir(), 'agents-office-cli'); // an empty cwd: no CLAUDE.md, no repo context
 const version = (() => { try { return JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version; } catch { return '?'; } })();
-const RUN_TIMEOUT = Math.max(60, +cfg.timeout || 300) * 1000; // agents with tools take longer than a plain draft
+const RUN_TIMEOUT = +process.env.AO_TIMEOUT_MS || Math.max(60, +cfg.timeout || 300) * 1000; // agents with tools take longer than a plain draft · AO_TIMEOUT_MS: tests only
+const CLOCK_ON = process.env.AO_CLOCK !== 'off';   // off: routines never fire (npm run check, the tests) — the clock must not run real work against real state
+const USAGE_ON = process.env.AO_USAGE !== 'off';   // off: no call to Claude's usage endpoint
+const HOST = process.env.AO_HOST || cfg.host || '127.0.0.1'; // this machine only: the API has no login, and it can approve outbound sends
+const MAX_ATTEMPTS = 3; // a task interrupted by a restart is picked up again at most this many times in total
 { const m = normModel(cfg.model); if (cfg.model && !m) console.warn(`config: model must be sonnet, opus or fable (got "${cfg.model}") — using ${DEFAULT_MODEL}`); cfg.model = m || DEFAULT_MODEL; } // V3.6: three models, by name
 { const e = normEffort(cfg.effort); if (cfg.effort && !e) console.warn(`config: effort must be low, medium, high, xhigh or max (got "${cfg.effort}") — using the model's own`); cfg.effort = e || ''; } // V3.6.1: the office's effort, empty = the model's own
 mcp.configure(cfg);
@@ -83,15 +89,17 @@ if (process.env.ANTHROPIC_API_KEY) {
 }
 
 /* ---------- storage ---------- */
-const load = () => { try { return JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch { return []; } };
-const save = list => { fs.mkdirSync(DATA, { recursive: true }); fs.writeFileSync(FILE, JSON.stringify(list, null, 2)); };
+// Missing file = no tasks yet. A damaged file is NOT "no tasks": store.mjs keeps the damaged copy,
+// falls back to the last good one, and otherwise throws, so a save can never write [] over it.
+const load = () => { const v = readJSON(FILE, []); if (!Array.isArray(v)) throw new StoreError(FILE + ' does not hold a task list', FILE); return v; };
+const save = list => writeJSON(FILE, list);
 const nid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 /* ---------- the usage gauge (V3.6, A3): Claude's own numbers, the office's count underneath ---------- */
 const USTATE = usage.loadState(DATA);
 let usageCache = { at: 0, value: null, stale: true };
 async function getUsage(force) {
   if (!force && !usageCache.stale && usageCache.value && Date.now() - usageCache.at < 60000) return usageCache.value;
-  const u = await usage.fetchUsage();
+  const u = USAGE_ON ? await usage.fetchUsage() : { ok: false, reason: 'usage checks are off (AO_USAGE=off)' };
   const v = u.ok ? { ...u, office: usage.fallback(USTATE).window } : { ...usage.fallback(USTATE), reason: u.reason };
   usageCache = { at: Date.now(), value: v, stale: false };
   return v;
@@ -107,75 +115,109 @@ const slug = t => String(t).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^
 // --input-format stream-json, which is how the CLI takes a picture without the agent needing file
 // tools (it never gets Read/Glob/Bash).
 // The system prompt is built most-important-first — who you are, the rules, your tools, the company
-// notes, and last the notes picked for this one task. So when it has to be cut, cutting the tail
-// drops the task's relevance picks before it touches the price list or the honesty rules, which is
-// the right order to lose things in. Budget leaves ~8k of the 32767 for the rest of the line.
-const SYS_MAX = 26000;
+// notes, and last the notes picked for this one task. It travels to the CLI as a FILE
+// (--system-prompt-file): on the command line it counted against Windows' 32,767-character limit,
+// which is why the company notes used to be cut short while the prompt told the agent they were
+// complete. The budget below is a sanity bound on the file, and anything past it is named as cut.
+const SYS_MAX = 150000;
 function fitSystem(system) {
   if (system.length <= SYS_MAX) return system;
-  console.warn(`  ⚠ system prompt ${system.length} chars — trimmed to ${SYS_MAX} (tail notes dropped)`);
-  return system.slice(0, SYS_MAX) + '\n\n[Some task notes were trimmed to fit. The company notes above are complete.]';
+  console.warn(`  ⚠ system prompt ${system.length} chars — cut to ${SYS_MAX}`);
+  return system.slice(0, SYS_MAX) + `\n\n[CUT: the last ${system.length - SYS_MAX} characters of these instructions (the task notes at the end) did not fit and are NOT above. If you need something that is not here, say it is missing — do not guess it.]`;
 }
-async function askX(system, user, { maxTokens = 4000, tools = true, timeout = RUN_TIMEOUT, model = cfg.model, effort = null, images = [] } = {}) { // model: sonnet · opus · fable · effort: low…max or null = the model's own (src/models.js)
+// A failed run carries what the office needs to decide what happens next:
+//   phase          'spawn' (Claude never started) · 'timeout' · 'exit' · 'result' (Claude reported an error) · 'empty' · 'api'
+//   toolsAttempted how many tool calls the agent had started — 0 means nothing outside this machine can have happened
+//   partial        any text the agent produced before it failed (useful, but not a finished result)
+function runError(message, fields) { return Object.assign(new Error(message), fields); }
+async function askX(system, user, { maxTokens = 4000, tools = true, timeout = RUN_TIMEOUT, model = cfg.model, effort = null, images = [], onToolUse = null } = {}) { // model: sonnet · opus · fable · effort: low…max or null = the model's own (src/models.js)
   if (sdk) {
     const content = images.length
       ? [...images.map(im => ({ type: 'image', source: { type: 'base64', media_type: im.media_type, data: im.data } })), { type: 'text', text: user }]
       : user;
-    const res = await sdk.messages.create({ model: modelId(model), max_tokens: maxTokens, system, messages: [{ role: 'user', content }] });
-    if (res.stop_reason === 'refusal') throw new Error('Claude declined this request');
+    let res;
+    try { res = await sdk.messages.create({ model: modelId(model), max_tokens: maxTokens, system, messages: [{ role: 'user', content }] }, { timeout, maxRetries: 1 }); }
+    catch (e) { const slow = /timed? ?out/i.test(e.message); throw runError(slow ? `Claude took longer than ${timeout / 1000} s (API)` : 'Claude API: ' + e.message, { phase: slow ? 'timeout' : 'api', toolsAttempted: 0, partial: '' }); }
+    if (res.stop_reason === 'refusal') throw runError('Claude declined this request', { phase: 'result', toolsAttempted: 0, partial: '' });
     bumpUsage(res.usage);
-    return { text: res.content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim(), tools: [], usage: res.usage, modelId: res.model };
+    return { text: res.content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim(), tools: [], blocked: [], usage: res.usage, modelId: res.model };
   }
   fs.mkdirSync(CLI_CWD, { recursive: true });
   const allowed = tools ? mcp.allowedTools() : [];
-  // Everything here is one Windows command line, and CreateProcess stops at 32767 characters —
-  // past that the spawn fails with ENAMETOOLONG and the task just dies. The whole company brain
-  // now rides in the system prompt, so the message goes in over stdin instead of `-p` (the same
-  // stream-json channel the images already use) and the system prompt gets a hard budget.
-  const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--no-session-persistence', '--system-prompt', fitSystem(system),
+  // The message goes in over stdin and the system prompt as a file, so the command line stays short
+  // whatever the size of the brain (CreateProcess stops at 32,767 characters).
+  const sysFile = path.join(CLI_CWD, `system-${process.pid}-${nid()}.txt`);
+  fs.writeFileSync(sysFile, fitSystem(system));
+  const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--no-session-persistence', '--system-prompt-file', sysFile,
     '--disallowedTools', 'Bash,Edit,Write,Read,Glob,Grep,Agent,NotebookEdit,Task' + (allowed.includes('WebFetch') ? '' : ',WebFetch,WebSearch')];
   if (allowed.length) args.push('--allowedTools', allowed.join(','));
   args.push(...modelArgs(model, effort));
   const env = { ...process.env }; delete env.CLAUDECODE; // the CLI refuses to nest inside another Claude Code session
   return new Promise((resolve, reject) => {
-    const p = spawn(claudeBin(cfg) || 'claude', args, { cwd: CLI_CWD, env, stdio: ['pipe', 'pipe', 'pipe'] });
-    p.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content: [
-      ...images.map(im => ({ type: 'image', source: { type: 'base64', media_type: im.media_type, data: im.data } })),
-      { type: 'text', text: user },
-    ] } }) + '\n');
-    p.stdin.end();
+    const startedAt = Date.now();
+    let settled = false, timer = null;
+    const cleanup = () => { try { fs.unlinkSync(sysFile); } catch {} };
+    const fail = e => { if (settled) return; settled = true; clearTimeout(timer); cleanup(); reject(e); };
+    const done = v => { if (settled) return; settled = true; clearTimeout(timer); cleanup(); resolve(v); };
     // A tool the agent REACHED FOR is not a tool it used: a denied connector (Notion) is refused
     // at the permission layer, but the attempt still shows up as a tool_use block. Logging those
     // the same way put "tools: Notion" in a note's frontmatter for a call that was blocked — the
     // audit trail could not tell "read the owner's Notion" from "was refused". So attempts are
     // held by id and only counted once a tool_result comes back that is not an error.
-    let out = '', err = '', text = '', used = [], gotResult = false, usageOut = null, modelUsed = null;
+    let out = '', err = '', text = '', used = [], gotResult = false, isError = false, errorKind = '', usageOut = null, modelUsed = null, toolsAttempted = 0, said = '';
     const attempted = new Map(); // tool_use id → name, until its result says whether it worked
     const blocked = [];
-    const timer = setTimeout(() => { p.kill('SIGKILL'); reject(new Error(`Claude took longer than ${timeout / 1000} s`)); }, timeout);
+    // what the agent was last seen doing — a timeout that says "calling Apollo, 240 s before the
+    // deadline" can be diagnosed; "took longer than 300 s" cannot
+    let last = { what: 'starting Claude', at: startedAt };
+    const seen = what => { last = { what, at: Date.now() }; };
+    const toolName = n => mcp.namesOf([n])[0] || n;
+    let p;
+    try { p = spawnClaude(claudeBin(cfg), args, { cwd: CLI_CWD, env, stdio: ['pipe', 'pipe', 'pipe'] }); }
+    catch (e) { cleanup(); return reject(runError('Could not start Claude: ' + e.message, { phase: 'spawn', toolsAttempted: 0, partial: '' })); }
+    timer = setTimeout(() => {
+      try { p.kill('SIGKILL'); } catch {}
+      const open = [...attempted.values()].map(toolName);
+      fail(runError(`Claude took longer than ${timeout / 1000} s — last activity: ${last.what}, ${Math.round((Date.now() - last.at) / 1000)} s before the deadline${open.length ? ' · tool call with no answer: ' + open.join(', ') : ''}`, { phase: 'timeout', toolsAttempted, partial: text || said.trim() }));
+    }, timeout);
+    p.on('error', e => fail(runError(e.code === 'ENOENT' ? 'Claude Code is not installed (claude not found on PATH)' : 'Could not start Claude: ' + e.message, { phase: 'spawn', toolsAttempted: 0, partial: '' })));
+    p.stdin.on('error', e => { err += `\nstdin: ${e.message}`; }); // EPIPE when the CLI dies early: the close handler reports it; unhandled, it would take the office down
+    p.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content: [
+      ...images.map(im => ({ type: 'image', source: { type: 'base64', media_type: im.media_type, data: im.data } })),
+      { type: 'text', text: user },
+    ] } }) + '\n');
+    p.stdin.end();
     const feed = line => {
       if (!line.trim()) return;
       let j; try { j = JSON.parse(line); } catch { return; }
-      if (j.type === 'system' && j.subtype === 'init') mcp.fromInit(j);
-      if (j.type === 'assistant' && j.message?.content) for (const b of j.message.content) if (b.type === 'tool_use' && b.name) attempted.set(b.id, b.name);
+      if (j.type === 'system' && j.subtype === 'init') { mcp.fromInit(j); seen('Claude started'); }
+      if (j.type === 'assistant' && j.message?.content) for (const b of j.message.content) {
+        if (b.type === 'tool_use' && b.name) { attempted.set(b.id, b.name); toolsAttempted++; seen('calling ' + toolName(b.name)); if (onToolUse) { try { onToolUse(b.name); } catch {} } }
+        else if (b.type === 'text') { said += (said ? '\n' : '') + (b.text || ''); seen('writing'); }
+      }
       if (j.type === 'user' && Array.isArray(j.message?.content)) for (const b of j.message.content) {
         if (b.type !== 'tool_result' || !attempted.has(b.tool_use_id)) continue;
         const name = attempted.get(b.tool_use_id); attempted.delete(b.tool_use_id);
+        seen('reading the result of ' + toolName(name));
         if (b.is_error) { if (!blocked.includes(name)) blocked.push(name); continue; }
         if (!used.includes(name)) used.push(name);
       }
-      if (j.type === 'result') { gotResult = true; text = String(j.result || '').trim(); if (j.is_error && !text) text = ''; usageOut = j.usage || null; modelUsed = Object.keys(j.modelUsage || {})[0] || null; }
+      if (j.type === 'result') { gotResult = true; text = String(j.result || '').trim(); isError = !!j.is_error; errorKind = j.subtype || ''; usageOut = j.usage || null; modelUsed = Object.entries(j.modelUsage || {}).sort((x, y) => ((y[1] && (y[1].costUSD || y[1].outputTokens)) || 0) - ((x[1] && (x[1].costUSD || x[1].outputTokens)) || 0))[0]?.[0] || null; /* the model that did the work, not the first listed (the CLI also lists the small model it uses for housekeeping) */ }
     };
     p.stdout.on('data', d => { out += d; let i; while ((i = out.indexOf('\n')) >= 0) { feed(out.slice(0, i)); out = out.slice(i + 1); } });
     p.stderr.on('data', d => { err += d; });
-    p.on('error', e => { clearTimeout(timer); reject(new Error(e.code === 'ENOENT' ? 'Claude Code is not installed (claude not found on PATH)' : e.message)); });
     p.on('close', code => {
-      clearTimeout(timer); feed(out);
-      if (code !== 0 && !gotResult) return reject(new Error(`claude exited ${code}${err ? ': ' + err.trim().slice(0, 300) : ''}`));
-      if (!gotResult) { try { text = String(JSON.parse(out).result || '').trim(); } catch { text = out.trim(); } }
+      feed(out); out = '';
+      if (settled) return; // the deadline (or a spawn error) already answered
       bumpUsage(usageOut);
       if (blocked.length) console.warn(`  ⚠ refused tool call${blocked.length > 1 ? 's' : ''}: ${mcp.namesOf(blocked).join(', ') || blocked.join(', ')}`);
-      resolve({ text, tools: used, blocked, usage: usageOut, modelId: modelUsed });
+      const partial = text || said.trim(); // what the agent had written: kept for the owner to see, never delivered as the result
+      const fields = { toolsAttempted, partial, blocked, exitCode: code };
+      // A result flagged is_error is an error even when it carries text — that text is usually the error.
+      if (gotResult && isError) return fail(runError(`Claude reported an error${errorKind && errorKind !== 'success' ? ` (${errorKind})` : ''}: ${(text || err.trim() || 'no detail').slice(0, 300)}`, { ...fields, phase: 'result' }));
+      if (code !== 0) return fail(runError(`claude exited ${code}${err.trim() ? ': ' + err.trim().slice(0, 300) : ''}${partial ? ' (its partial output is kept, not delivered)' : ''}`, { ...fields, phase: 'exit' }));
+      if (!gotResult) return fail(runError(`Claude ended without a result${err.trim() ? ': ' + err.trim().slice(0, 300) : ''}`, { ...fields, phase: 'empty' }));
+      done({ text, tools: used, blocked, usage: usageOut, modelId: modelUsed });
     });
   });
 }
@@ -214,13 +256,18 @@ const CORE_NOTES = [
   // the exact thing that sent agents hunting for files they cannot open. Relevance search can
   // still surface it.
 ];
-const CORE_CAP = { 'offer-ladder': 4500, 'icp': 3600, 'services': 3000, 'CLAUDE': 2600 }; // tables and the ICP need room
+// Budgets, not silent slices. The core notes go in whole (all eight together are ~24k characters,
+// and the prompt now travels as a file). A note is only cut if it outgrows its budget, and then the
+// cut is written into the prompt, so the agent knows the rest exists and is not in front of it.
+const CORE_NOTE_MAX = 12000, TASK_NOTE_MAX = 4000;
+const clip = (name, text, max) => text.length <= max ? text
+  : text.slice(0, max) + `\n[CUT: the rest of ${name}.md (${text.length - max} more characters) is NOT in this prompt. Do not guess what it says; say it is missing if you need it.]`;
 // An agent has no file tools. Handed a path like `10-Business/offer-ladder.md` it goes looking for
 // a document system it CAN reach — which is how Proposals ended up asking for Notion access and
 // writing "(price to confirm)" with the price list sitting in its own prompt. So the block says
 // outright that these notes are here, complete, and are not to be fetched from anywhere.
 const NOTES_HEADER = [
-  "COMPANY NOTES — the company's own brain, reproduced below in full.",
+  "COMPANY NOTES — the company's own brain, reproduced below. A note that had to be shortened says [CUT] where it stops.",
   'These are the authoritative source for who we are, what we sell and what it costs.',
   'They are already here: do NOT look for them in Notion, Drive, a CRM or any other tool, and never',
   'say you could not reach them. Where a skill names a path (e.g. `10-Business/offer-ladder.md`) it',
@@ -230,7 +277,7 @@ function businessContext(index) {
   const bits = [];
   for (const k of CORE_NOTES) {
     if (!index.has(k)) continue;
-    bits.push('--- ' + k + '.md ---\n' + index.get(k).slice(0, CORE_CAP[k] || 1400));
+    bits.push('--- ' + k + '.md ---\n' + clip(k, index.get(k), CORE_NOTE_MAX));
   }
   return bits.join('\n\n');
 }
@@ -252,7 +299,7 @@ function relevantNotes(index, dept, text, n = 4) {
   return picks;
 }
 function contextText(index, names) {
-  return names.map(n => `--- ${n}.md ---\n${(index.get(n) || '').slice(0, 1800)}`).join('\n\n');
+  return names.map(n => `--- ${n}.md ---\n${clip(n, index.get(n) || '', TASK_NOTE_MAX)}`).join('\n\n');
 }
 
 /* ---------- the roster, as Claude sees it ---------- */
@@ -276,7 +323,8 @@ async function route(dept, text) {
   return { agent, title: String(j.title || text).slice(0, 90), plan: Array.isArray(j.plan) ? j.plan.slice(0, 4).map(String) : [],
     eta: Number.isFinite(j.eta_minutes) ? j.eta_minutes : 30, why: String(j.why || ''), needsOk: typeof j.needs_ok === 'boolean' ? j.needs_ok : routines.guessNeedsOk(text) };
 }
-async function run(task, feedback, mode) { // mode: undefined (a task from the bar) · 'routine' (read-only routine) · 'draft' (routine that waits for the OK) · 'approve' (the owner ticked it)
+// mode: 'readonly' (judged to only read and report) · 'draft' (anything outbound: prepare it, send nothing) · 'approve' (the owner ticked this exact draft)
+async function run(task, feedback, mode, { onToolUse } = {}) {
   const a = AGENTS.find(x => x.id === task.agent), d = DEPTS[a.department];
   refreshSkills();
   const index = vaultIndex();
@@ -288,14 +336,15 @@ async function run(task, feedback, mode) { // mode: undefined (a task from the b
     `${mcp.promptText(a.tools)}\n\n${NOTES_HEADER}\n\n${businessContext(index)}\n\nNOTES YOU READ FOR THIS TASK\n${contextText(index, read)}`;
   const routineLine = task.routine ? `\nThis is a routine (${task.when}): it runs on the office's own clock and the owner is not at the keyboard. It is now ${new Date().toLocaleString([], { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })}${task.late ? `; this run is late, it was due ${new Date(task.due).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}` : ''}. Do the work for now.` : '';
   const modeLine = mode === 'draft' ? '\nPrepare everything, but send, post, pay or change NOTHING outside this machine: the owner reads this first and approves it. End with one line saying exactly what will go out when approved (or that nothing needs to).'
-    : mode === 'approve' ? `\nThe owner has APPROVED the draft below. Carry out the outbound step now, exactly as drafted, with your tools (send, post, update). If a tool you need is not connected, say so and show what you would have sent. Then report in one short section: what went out, to whom, and anything that did not.\nApproved draft:\n${task.draft || task.result}` : '';
+    : mode === 'approve' ? `\nThe owner has APPROVED the draft below. Carry out the outbound step now, exactly as drafted, with your tools (send, post, update). If a tool you need is not connected, say so and show what you would have sent. Then report in one short section: what went out, to whom, and anything that did not.\nApproved draft:\n${task.approval.draft}`
+    : '\nThis task was judged read-only: read, research and report. Send, post, pay, delete or change NOTHING outside this machine. If doing it properly needs an outbound step, draft that step and say it needs the owner\'s OK.';
   const user = `Task: ${task.title}\nOwner's request: ${task.text}` + (task.plan?.length ? `\nAgreed plan: ${task.plan.join(' → ')}` : '') + routineLine + modeLine +
     (feedback && mode !== 'approve' ? `\n\nThe owner reviewed your previous version and asked for changes: "${feedback}"\nPrevious version:\n${task.result}` : '');
   const pick = modelFor({ task: task.model, routine: task.routineModel, agent: a.model, office: cfg.model }); // four places, one precedence
   const eff = effortFor({ task: task.effort, routine: task.routineEffort, agent: a.effort, office: cfg.effort, model: pick.model }); // same places, then the model's own
-  const { text, tools, modelId: ran } = await askX(system, user, { model: pick.model, effort: eff.effort });
-  if (!text) throw new Error('Claude returned nothing');
-  return { result: text, read, tools: toolKeys(tools), used: mcp.namesOf(tools), skills: skills.names(a), modelUsed: pick.model, modelFrom: pick.from, modelId: ran, effortUsed: eff.effort || '', effortFrom: eff.from };
+  const { text, tools, blocked, modelId: ran } = await askX(system, user, { model: pick.model, effort: eff.effort, onToolUse });
+  if (!text) throw Object.assign(new Error('Claude returned nothing'), { phase: 'empty', toolsAttempted: tools.length + blocked.length });
+  return { result: text, read, tools: toolKeys(tools), used: mcp.namesOf(tools), blocked: mcp.namesOf(blocked).length ? mcp.namesOf(blocked) : blocked, skills: skills.names(a), modelUsed: pick.model, modelFrom: pick.from, modelId: ran, effortUsed: eff.effort || '', effortFrom: eff.from };
 }
 function writeNote(task) { // the deliverable becomes a note in the brain, linked to what was read
   fs.mkdirSync(NOTES_DIR, { recursive: true });
@@ -359,7 +408,7 @@ function loadRoutines() { // re-read from disk every time: a routine written by 
 }
 const routinesOut = () => { const list = loadRoutines(); return { routines: list, depts: routines.ALLOWED, path: rlist.path, problems: rlist.problems }; };
 const agentName = id => AGENTS.find(a => a.id === id)?.name || id;
-// routine-driven runs go one at a time, so a burst of catch-ups after a long sleep does not spawn five Claude processes at once
+/// routine-driven runs go one at a time, so a burst of catch-ups after a long sleep does not spawn five Claude processes at once
 let queue = Promise.resolve();
 const enqueue = fn => { const p = queue.then(fn, fn); queue = p.catch(() => {}); return p; };
 function fire(r, { due = Date.now(), late = false, by = 'routine' } = {}) { // the routine becomes a task and runs here, page or no page
@@ -367,25 +416,152 @@ function fire(r, { due = Date.now(), late = false, by = 'routine' } = {}) { // t
   const list = load(); list.push(task); save(list);
   routines.advance(RSTATE, r, Date.now(), task.id, late); routines.saveState(DATA, RSTATE);
   console.log(`⏱ ${task.id} → ${task.agent}: ${task.title}${late ? ' (LATE · was due ' + new Date(due).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ')' : ''}`);
-  enqueue(() => runServerTask(task.id));
+  enqueue(() => startQueued(task.id));
   return task;
 }
-async function runServerTask(id, { feedback, approve } = {}) {
-  let list = load(); const task = list.find(t => t.id === id); if (!task) return null;
-  task.state = 'doing'; task.startedAt = Date.now(); delete task.ask; save(list);
-  try {
-    const out = await run(task, feedback, approve ? 'approve' : task.needsOk ? 'draft' : 'routine');
-    if (approve) { task.result = (task.draft || task.result) + '\n\n---\nAFTER YOUR OK\n' + out.result; task.approved = true; task.approvedAt = Date.now(); }
-    else task.result = out.result;
-    Object.assign(task, { read: out.read, tools: [...new Set([...(task.tools || []), ...out.tools])], used: [...new Set([...(task.used || []), ...out.used])], skills: out.skills, error: false, modelUsed: out.modelUsed, modelFrom: out.modelFrom, modelId: out.modelId, effortUsed: out.effortUsed, effortFrom: out.effortFrom });
-    if (task.needsOk && !approve) { task.state = 'waiting'; task.draft = out.result; task.waitingAt = Date.now(); task.ask = routines.askLine(task); }
-    else { task.state = 'done'; task.doneAt = Date.now(); task.note = writeNote(task); await rebuildGraph(); }
-  } catch (e) {
-    Object.assign(task, { state: 'done', doneAt: Date.now(), result: 'Could not complete this task: ' + e.message, error: true });
+
+/* ---------- the task lifecycle ----------
+   next ──run──▶ doing ──▶ done                 (judged read-only: needsOk false)
+                      └──▶ waiting ──approve──▶ doing ──▶ done           (anything outbound: a draft first)
+                               └──reject───▶ doing ──▶ waiting (the rework)
+   done ──revise──▶ doing ──▶ done or waiting
+
+   One policy for every path. A task typed into the bar, a routine firing, a revision and an
+   approval all go through claim() and execute(); whether the agent may send is decided by the
+   task's needsOk (from the router or the routine), never by which button started it.
+
+   claim() checks the state and writes 'doing' in one synchronous step — no await between the read
+   and the write — so two clicks, two tabs, or the page and the clock asking at once get exactly
+   one run, and every other request is told it is already running.
+
+   An approval is for ONE draft: the text and its hash are frozen into task.approval when the owner
+   ticks it. A new draft (a rework) gets a new hash and needs a new tick; an approve request that
+   names an older draft is refused. If the send fails, what happens next depends on whether the
+   agent had started calling a tool: if not, nothing can have gone out and the draft goes back to
+   waiting; if it had, the outcome is UNKNOWN — the task says so and is never retried automatically. */
+const hash = text => crypto.createHash('sha256').update(String(text)).digest('hex').slice(0, 16);
+const modeFor = t => t.needsOk === false ? 'readonly' : 'draft'; // unknown = the safe side: draft, and wait for the OK
+const ACTIONS = { run: ['next'], revise: ['done'], approve: ['waiting'], reject: ['waiting'] };
+function claim(id, action, { waitingAt } = {}) {
+  const list = load(); const t = list.find(x => x.id === id);
+  if (!t) return { status: 404, error: 'no such task' };
+  if (!ACTIONS[action].includes(t.state)) {
+    const why = t.state === 'doing' ? 'this task is already running — nothing new was started'
+      : action === 'approve' || action === 'reject' ? 'this task is not waiting for your OK' : `a task that is ${t.state} cannot be ${action === 'run' ? 'run' : 'revised'}`;
+    return { status: 409, error: why, task: t };
   }
-  list = load(); const i = list.findIndex(t => t.id === task.id); if (i >= 0) list[i] = task; save(list);
-  console.log(`${task.error ? '✗' : task.state === 'waiting' ? '⏸' : '✓'} ${task.id} ${task.error ? 'failed' : task.state === 'waiting' ? 'waiting for your OK' : 'done'} (${task.result.length} chars${task.tools?.length ? ', tools: ' + task.tools.join(' ') : ''}${task.note ? ', note: ' + task.note : ''})`);
-  return task;
+  if (action === 'revise' && t.needsCheck) return { status: 409, error: 'the last send has an unknown outcome — check whether it went out before changing this task', task: t };
+  if (action === 'revise' && t.error) return { status: 409, error: 'this task failed — there is no result to revise', task: t };
+  if (action === 'approve') {
+    if (waitingAt !== undefined && waitingAt !== null && +waitingAt !== t.waitingAt) return { status: 409, error: 'the draft changed since you opened it — read the new one before approving', task: t };
+    if (!t.draft || hash(t.draft) !== t.draftHash) return { status: 409, error: 'the draft was edited after it was written — send it back for rework rather than approving an unchecked text', task: t };
+  }
+  const at = { id: nid(), action, mode: action === 'approve' ? 'approve' : modeFor(t), startedAt: Date.now() };
+  if (action === 'approve') { t.approval = { draft: t.draft, draftHash: t.draftHash, approvedAt: at.startedAt, attempt: at.id, scope: 'send this draft once, as written' }; delete t.sendStartedAt; }
+  t.attempts = [...(t.attempts || []), at]; t.attempt = at.id;
+  t.state = 'doing'; t.startedAt = at.startedAt; delete t.ask;
+  save(list);
+  return { task: t, attempt: at };
+}
+// the clock's path: claim at the moment the queue reaches the task (the page may have started it first)
+async function startQueued(id) {
+  const c = claim(id, 'run');
+  if (c.error) { if (c.status !== 404 && c.task?.state !== 'doing') console.warn(`  ${id}: ${c.error}`); return c.task || null; }
+  return execute(id, c.attempt.id);
+}
+function patchTask(id, fn) { const list = load(); const t = list.find(x => x.id === id); if (t && fn(t) !== false) save(list); }
+async function execute(id, attemptId, { feedback } = {}) {
+  const snap = load().find(t => t.id === id);
+  const at = snap?.attempts?.find(a => a.id === attemptId);
+  if (!snap || !at || snap.attempt !== attemptId) return snap || null;
+  let out = null, failure = null, sendMarked = false;
+  // the first tool call of an approved send is written to disk as it happens: after a crash, that is
+  // the difference between "nothing went out" and "it may have gone out"
+  const onToolUse = at.mode === 'approve' ? () => { if (sendMarked) return; sendMarked = true; patchTask(id, t => { if (t.attempt !== attemptId) return false; t.sendStartedAt = Date.now(); }); } : null;
+  try { out = await run(snap, feedback, at.mode, { onToolUse }); } catch (e) { failure = e; }
+
+  const list = load(); const t = list.find(x => x.id === id);
+  if (!t) { console.log(`  ${id} was deleted while it ran — its result was dropped`); return null; }
+  if (t.attempt !== attemptId) return t;
+  const a = t.attempts.find(x => x.id === attemptId); a.endedAt = Date.now(); delete t.attempt;
+  if (out) {
+    a.outcome = 'ok';
+    Object.assign(t, { read: out.read, tools: [...new Set([...(t.tools || []), ...out.tools])], used: [...new Set([...(t.used || []), ...out.used])], blocked: out.blocked, skills: out.skills, error: false, modelUsed: out.modelUsed, modelFrom: out.modelFrom, modelId: out.modelId, effortUsed: out.effortUsed, effortFrom: out.effortFrom });
+    delete t.lastError;
+    if (at.mode === 'approve') { t.result = t.approval.draft + '\n\n---\nAFTER YOUR OK\n' + out.result; t.approved = true; t.approvedAt = t.approval.approvedAt; t.state = 'done'; t.doneAt = Date.now(); }
+    else if (at.mode === 'draft') { t.result = out.result; t.draft = out.result; t.draftHash = hash(out.result); t.waitingAt = Date.now(); t.state = 'waiting'; t.ask = routines.askLine(t); }
+    else { t.result = out.result; t.state = 'done'; t.doneAt = Date.now(); }
+  } else {
+    Object.assign(a, { outcome: 'error', error: failure.message, phase: failure.phase || '' });
+    t.lastError = failure.message;
+    if (at.mode === 'approve' && !failure.toolsAttempted && !t.sendStartedAt) {
+      a.outcome = 'not-sent'; // the agent never reached a tool, so nothing left this machine; the approval is spent
+      Object.assign(t, { state: 'waiting', waitingAt: Date.now(), error: false, ask: `"${t.title}" was approved but the send never started (${failure.message}). Nothing went out. Approve again to retry, or reject to change it.` });
+      delete t.approval;
+    } else if (at.mode === 'approve') {
+      a.outcome = 'unknown';
+      Object.assign(t, { state: 'done', doneAt: Date.now(), error: true, needsCheck: true,
+        result: t.approval.draft + `\n\n---\nAFTER YOUR OK — OUTCOME UNKNOWN\nThe agent started the send and then stopped reporting (${failure.message}). It may have gone out, in part or in full. It has NOT been retried and will not be. Check the connector (the sent folder, the post, the record) before doing anything else with this.` + (failure.partial ? `\n\nThe agent's last words:\n${failure.partial}` : '') });
+    } else if (at.action === 'reject' && t.draft) {
+      Object.assign(t, { state: 'waiting', waitingAt: Date.now(), error: false, ask: `The rework of "${t.title}" failed (${failure.message}). The previous draft is still here — approve it as it is, or reject again.` });
+    } else if (at.action === 'revise') {
+      Object.assign(t, { state: 'done', error: false }); // the previous result stands; the failed revision is in lastError and the attempt
+    } else {
+      Object.assign(t, { state: 'done', doneAt: Date.now(), error: true, result: 'Could not complete this task: ' + failure.message + (failure.partial ? `\n\nPartial output — NOT a finished result:\n${failure.partial}` : '') });
+    }
+  }
+  // Filing is not the work. A note that fails to save must not turn a finished task — least of all
+  // a send that went out — into a failed task someone might run again.
+  if (t.state === 'done' && !t.error) {
+    try { t.note = writeNote(t); t.filed = 'ok'; delete t.noteError; }
+    catch (e) { t.filed = 'failed'; t.noteError = e.message; console.warn(`  ⚠ ${t.id}: the work is done but the note could not be saved: ${e.message}`); }
+  }
+  save(list);
+  if (t.filed === 'ok' && t.state === 'done') await rebuildGraph();
+  const tag = t.needsCheck ? '? outcome unknown' : t.error ? '✗ failed' : t.state === 'waiting' ? '⏸ waiting for your OK' : a.outcome === 'error' ? '✗ revision failed, previous result kept' : '✓ done';
+  console.log(`${tag.slice(0, 1)} ${t.id} ${tag.slice(2)} (${a.action}/${a.mode}${failure ? ': ' + failure.message.slice(0, 160) : ''}${t.tools?.length ? ', tools: ' + t.tools.join(' ') : ''}${t.note && t.filed === 'ok' && !failure ? ', note: ' + t.note : ''})`);
+  return t;
+}
+// After a crash, a restart or a sleep, the queue in memory is gone. Nothing that was mid-flight is
+// silently dropped, and nothing that might have sent something is silently repeated.
+function recoverTasks() {
+  let list; try { list = load(); } catch (e) { console.error('  ✗ tasks:', e.message); return; }
+  let changed = false; const requeue = [], notes = [];
+  for (const t of list) {
+    if (t.state === 'waiting' && t.draft && !t.draftHash) { t.draftHash = hash(t.draft); t.waitingAt = t.waitingAt || Date.now(); changed = true; } // drafts from before approvals were tied to their text
+    if (t.state === 'next' && t.by === 'routine') { requeue.push(t.id); continue; }
+    if (t.state !== 'doing') continue;
+    changed = true;
+    const at = (t.attempts || []).find(x => x.id === t.attempt);
+    if (at) Object.assign(at, { endedAt: Date.now(), outcome: 'interrupted' });
+    delete t.attempt;
+    const action = at ? at.action : t.draft ? 'approve' : 'run'; // before attempts were recorded: a draft in flight may have been a send
+    if (action === 'approve' && at && !t.sendStartedAt) {
+      Object.assign(t, { state: 'waiting', waitingAt: Date.now(), ask: `The office restarted before "${t.title}" was sent. Nothing went out. Approve again to send it.` });
+      delete t.approval; notes.push(`${t.id} back to waiting (restart before the send)`);
+    } else if (action === 'approve') {
+      Object.assign(t, { state: 'done', doneAt: Date.now(), error: true, needsCheck: true,
+        result: (t.approval?.draft || t.draft || '') + '\n\n---\nAFTER YOUR OK — OUTCOME UNKNOWN\nThe office stopped while this send was in progress. It may have gone out. It has NOT been retried. Check the connector before doing anything else with this.' });
+      notes.push(`${t.id} OUTCOME UNKNOWN (restart during a send)`);
+    } else if (action === 'reject') {
+      Object.assign(t, { state: 'waiting', waitingAt: Date.now(), ask: `The office restarted while "${t.title}" was being reworked. The previous draft is still here — approve it, or reject again.` });
+      notes.push(`${t.id} back to waiting (rework interrupted)`);
+    } else if (action === 'revise') {
+      Object.assign(t, { state: 'done', lastError: 'the revision was interrupted by a restart — ask for it again' });
+      notes.push(`${t.id} revision interrupted, previous result kept`);
+    } else if ((t.attempts || []).length >= MAX_ATTEMPTS) {
+      Object.assign(t, { state: 'done', doneAt: Date.now(), error: true, result: `Could not complete this task: it was interrupted ${t.attempts.length} times and will not be started again automatically.` });
+      notes.push(`${t.id} failed after ${t.attempts.length} interrupted attempts`);
+    } else {
+      t.state = 'next'; t.interrupted = (t.interrupted || 0) + 1;
+      if (t.by === 'routine') requeue.push(t.id);
+      notes.push(`${t.id} back to next (interrupted)`);
+    }
+  }
+  if (changed) save(list);
+  for (const n of notes) console.log('  ↺ ' + n);
+  for (const id of requeue) enqueue(() => startQueued(id));
+  if (requeue.length) console.log(`  ↺ ${requeue.length} routine task${requeue.length > 1 ? 's' : ''} queued again`);
 }
 // The usage budget. A office of this size firing routines every morning can burn a whole Claude
 // plan window before lunch, and the failure mode is silent: the plan runs out and work just stops.
@@ -474,8 +650,22 @@ await rebuildGraph();
 const discovering = mcp.discover().then(l => { console.log(`  connectors: ${l.filter(s => s.status === 'connected').length} connected of ${l.length} (claude mcp list)`); return l; });
 const agentsOut = () => { const setup = setupMap(); return AGENTS.map(a => ({ id: a.id, name: a.name, role: a.role, does: a.does, tools: a.tools, brief: a.brief || '', model: a.model || '', effort: a.effort || '', skills: skills.names(a), lessons: learn.count(BRAIN, a.id), department: a.department, lead: a.lead,
   interviewer: leadOf(a.department).id === a.id, setUp: setup[a.department] })); };
+// No login guards this API, and it can approve outbound sends. Two browser-borne attacks are shut:
+// another website posting to it from a page the owner has open (a cross-origin request carries an
+// Origin that is not this office), and DNS rebinding (a foreign hostname pointed at 127.0.0.1).
+const LOOPBACK = /^(127\.0\.0\.1|localhost|::1)$/i.test(HOST);
+function refused(req) {
+  const host = String(req.headers.host || '');
+  if (LOOPBACK && !/^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(host)) return 'unknown host';
+  if (req.method !== 'GET' && req.method !== 'HEAD' && req.headers.origin) {
+    let o; try { o = new URL(req.headers.origin).host; } catch { return 'bad origin'; }
+    if (o !== host) return 'cross-site request';
+  }
+  return null;
+}
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
+  const no = refused(req); if (no) return json(res, 403, { error: 'refused: ' + no });
   try {
     if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/command-centre-v2.html' || url.pathname === '/dark')) {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
@@ -483,7 +673,7 @@ const server = http.createServer(async (req, res) => {
       return res.end(url.pathname === '/dark' ? page.replace('<body>', '<body class="dark">') : page); // /dark: the same file, opened in dark mode
     }
     if (url.pathname === '/api/health') return json(res, 200, { ok: true, version, backend, model: cfg.model, modelName: modelName(cfg.model), models: MODEL_KEYS, effort: cfg.effort || '', efforts: EFFORT_KEYS, name: cfg.name, brain: BRAIN, notes: graph.notes, depts: DEPT_KEYS,
-      agents: agentsOut(), setup: setupMap(), routines: (l => ({ count: l.length, paused: l.filter(r => r.paused).length, depts: routines.ALLOWED }))(loadRoutines()), roster: { customised: roster.customised, briefed: roster.briefed, files: roster.files, problems: roster.problems }, skills: (({ count, shipped, brain, problems }) => ({ count, shipped, brain, problems }))(skills.summary()), tools: backend === 'claude-cli', mcp: mcp.summary() });
+      agents: agentsOut(), setup: setupMap(), routines: (l => ({ count: l.length, paused: l.filter(r => r.paused).length, depts: routines.ALLOWED }))(loadRoutines()), roster: { customised: roster.customised, briefed: roster.briefed, files: roster.files, problems: roster.problems }, skills: (({ count, shipped, brain, problems }) => ({ count, shipped, brain, problems }))(skills.summary()), tools: backend === 'claude-cli', mcp: mcp.summary(), clock: CLOCK_ON, host: HOST });
     if (url.pathname === '/api/agents') return json(res, 200, { agents: agentsOut(), problems: roster.problems, files: roster.files });
     if (url.pathname === '/api/skills') return json(res, 200, refreshSkills().summary()); // reloads from disk: edit a skill, hit this, see it
     if (url.pathname === '/api/lessons') return json(res, 200, { dir: learn.dir(BRAIN), agents: AGENTS.map(a => ({ id: a.id, name: a.name, ...learn.read(BRAIN, a.id) })).filter(x => x.rules.length || x.oneOffs.length) });
@@ -520,45 +710,38 @@ const server = http.createServer(async (req, res) => {
       if (!DEPTS[dept] || dept === 'brain') return json(res, 400, { error: 'unknown department' });
       if (!text || !String(text).trim()) return json(res, 400, { error: 'empty task' });
       const r = await route(dept, String(text).trim());
-      const task = { id: nid(), dept, agent: r.agent, title: r.title, text: String(text).trim(), plan: r.plan, eta: r.eta, why: r.why, state: 'next', addedAt: Date.now(), by: 'you', model: normModel(model) || undefined, effort: normEffort(effort) || undefined }; // model/effort: set on this task (beats routine, agent, office)
+      // needsOk is the router's judgement and it is kept: a task typed into the bar that sends, posts or
+      // pays now drafts first and waits for the OK, exactly like a routine does
+      const task = { id: nid(), dept, agent: r.agent, title: r.title, text: String(text).trim(), plan: r.plan, eta: r.eta, why: r.why, needsOk: r.needsOk, state: 'next', addedAt: Date.now(), by: 'you', model: normModel(model) || undefined, effort: normEffort(effort) || undefined }; // model/effort: set on this task (beats routine, agent, office)
       const list = load(); list.push(task); save(list);
-      console.log(`+ ${task.id} → ${task.agent}: ${task.title}`);
+      console.log(`+ ${task.id} → ${task.agent}: ${task.title}${task.needsOk ? ' (drafts first, waits for your OK)' : ''}`);
       return json(res, 200, task);
     }
     const m = url.pathname.match(/^\/api\/tasks\/([^/]+)(?:\/(run|revise|approve|reject))?$/);
-    if (m && req.method === 'POST' && (m[2] === 'approve' || m[2] === 'reject')) { // D1: the owner's tick on a routine's draft
-      const task = load().find(t => t.id === m[1]);
-      if (!task) return json(res, 404, { error: 'no such task' });
-      if (task.state !== 'waiting') return json(res, 400, { error: 'this task is not waiting for your OK' });
-      const { feedback } = m[2] === 'reject' ? await body(req) : {};
-      const note = String(feedback || '').trim();
-      console.log(`${m[2] === 'approve' ? '✅' : '↩'} ${task.id} ${m[2] === 'approve' ? 'approved — ' + agentName(task.agent) + ' is sending' : 'sent back: ' + note.slice(0, 80)}`);
-      enqueue(() => runServerTask(task.id, m[2] === 'approve' ? { approve: true } : { feedback: note || 'Not this. Rework it.' }))
-        .then(t => { if (m[2] === 'reject' && note && t && !t.error) { const a = AGENTS.find(x => x.id === t.agent); return learn.classify(ask, a, t, note).then(v => { const r = learn.record(BRAIN, a, t, note, v); console.log(`  ↳ ${a.name} ${r.standing ? 'learned a rule' : 'noted a one-off'}: ${r.line.slice(0, 100)}`); }); } })
+    const learnFrom = (t, note) => { // a correction becomes a lesson only when the rework it asked for actually happened
+      const a = AGENTS.find(x => x.id === t.agent);
+      learn.classify(ask, a, t, note).then(v => { const r = learn.record(BRAIN, a, t, note, v); console.log(`  ↳ ${a.name} ${r.standing ? 'learned a rule' : 'noted a one-off'}: ${r.line.slice(0, 100)}`); })
+        .catch(e => console.warn('learn:', e.message));
+    };
+    if (m && req.method === 'POST' && (m[2] === 'approve' || m[2] === 'reject')) { // D1: the owner's tick (or note) on a draft
+      const b = await body(req);
+      const note = String(b.feedback || '').trim();
+      const c = claim(m[1], m[2], { waitingAt: b.waitingAt }); // after the body is read: nothing may await between the check and the claim
+      if (c.error) return json(res, c.status, { error: c.error, state: c.task?.state });
+      console.log(`${m[2] === 'approve' ? '✅' : '↩'} ${c.task.id} ${m[2] === 'approve' ? 'approved — ' + agentName(c.task.agent) + ' is sending' : 'sent back: ' + note.slice(0, 80)}`);
+      enqueue(() => execute(c.task.id, c.attempt.id, m[2] === 'reject' ? { feedback: note || 'Not this. Rework it.' } : {}))
+        .then(t => { if (m[2] === 'reject' && note && t && t.state === 'waiting' && !t.lastError) learnFrom(t, note); })
         .catch(e => console.warn('approval:', e.message));
-      return json(res, 200, { ok: true, id: task.id, state: 'doing' });
+      return json(res, 200, { ok: true, id: c.task.id, state: 'doing', attempt: c.attempt.id });
     }
     if (m && req.method === 'POST' && (m[2] === 'run' || m[2] === 'revise')) {
-      const list = load(); const task = list.find(t => t.id === m[1]);
-      if (!task) return json(res, 404, { error: 'no such task' });
       const { feedback } = m[2] === 'revise' ? await body(req) : {};
-      task.state = 'doing'; task.startedAt = Date.now(); save(list);
-      try {
-        const { result, read, tools, used, skills: sk, modelUsed, modelFrom, modelId: ran, effortUsed, effortFrom } = await run(task, feedback);
-        Object.assign(task, { state: 'done', doneAt: Date.now(), result, read, tools, used, skills: sk, error: false, modelUsed, modelFrom, modelId: ran, effortUsed, effortFrom });
-        task.note = writeNote(task);
-        await rebuildGraph();
-      } catch (e) {
-        Object.assign(task, { state: 'done', doneAt: Date.now(), result: 'Could not complete this task: ' + e.message, error: true });
-      }
-      const l2 = load(); const i = l2.findIndex(t => t.id === task.id); if (i >= 0) l2[i] = task; save(l2);
-      console.log(`${task.error ? '✗' : '✓'} ${task.id} ${task.error ? 'failed' : 'done'} (${task.result.length} chars${task.tools?.length ? ', tools: ' + task.tools.join(' ') : ''}${task.note ? ', note: ' + task.note : ''})`);
-      json(res, 200, task);
-      if (feedback && !task.error) { // learn from the correction, after the reply is out the door
-        const a = AGENTS.find(x => x.id === task.agent);
-        learn.classify(ask, a, task, feedback).then(v => { const r = learn.record(BRAIN, a, task, feedback, v); console.log(`  ↳ ${a.name} ${r.standing ? 'learned a rule' : 'noted a one-off'}: ${r.line.slice(0, 100)}`); })
-          .catch(e => console.warn('learn:', e.message));
-      }
+      const c = claim(m[1], m[2]);
+      if (c.error) return json(res, c.status, { error: c.error, state: c.task?.state });
+      const t = await execute(c.task.id, c.attempt.id, { feedback }); // keeps going if the page goes away; the page's poll picks the result up
+      if (!t) return json(res, 404, { error: 'the task was deleted while it ran' });
+      json(res, 200, t);
+      if (feedback && !t.error && !t.lastError) learnFrom(t, feedback); // after the reply is out the door
       return;
     }
     if (m && req.method === 'DELETE') { save(load().filter(t => t.id !== m[1])); return json(res, 200, { ok: true }); }
@@ -583,18 +766,25 @@ const server = http.createServer(async (req, res) => {
     json(res, 404, { error: 'not found' });
   } catch (e) { console.error(e); json(res, 500, { error: e.message }); }
 });
-server.listen(cfg.port, () => {
-  console.log(`Agents Office ${version} → http://localhost:${cfg.port}`);
+server.on('error', e => {
+  if (e.code === 'EADDRINUSE') console.error(`✗ port ${cfg.port} on ${HOST} is already in use — another office (or another program) has it. Stop that one, or start this one with PORT=<another port>.`);
+  else console.error('✗ server:', e.message);
+  process.exit(1);
+});
+server.listen(cfg.port, HOST, () => {
+  console.log(`Agents Office ${version} → http://localhost:${cfg.port}${LOOPBACK ? '   (this machine only)' : '   ⚠ listening on ' + HOST + ' — anyone who can reach it can run and approve tasks'}`);
   console.log(`  business: ${cfg.name}   brain: ${BRAIN} (${graph.notes} notes, ${graph.links.length} links)   claude: ${backend}${backend === 'claude-cli' ? ' (' + claudeSource(cfg) + ')' : ''} · ${modelName(cfg.model)}${cfg.effort ? ' · effort ' + cfg.effort : ''} by default (routing on Sonnet)`);
   if (backend === 'claude-cli' && !claudeBin(cfg)) console.warn('  ⚠ no Claude Code binary found — tasks and chat will fail. Install the CLI (npm i -g @anthropic-ai/claude-code) or set "claudePath" in office.config.json.');
-  getUsage(true).then(u => console.log(u.source === 'claude' ? `  usage: session ${u.session?.percent ?? '—'}% · week ${u.week?.percent ?? '—'}% (your Claude plan, as Claude Code shows it)` : `  usage: Claude's gauge unavailable (${u.reason}) — showing the office's own count`)).catch(() => {});
+  if (USAGE_ON) getUsage(true).then(u => console.log(u.source === 'claude' ? `  usage: session ${u.session?.percent ?? '—'}% · week ${u.week?.percent ?? '—'}% (your Claude plan, as Claude Code shows it)` : `  usage: Claude's gauge unavailable (${u.reason}) — showing the office's own count`)).catch(() => {});
   brainGit.ensureRepo(BRAIN);
   console.log(`  tasks: ${FILE}   notes the agents write: ${NOTES_DIR}`);
   console.log(`  usage guard: routines hold above ${USAGE_CEILING}% of the session window (usageCeiling in office.config.json)`);
   console.log(`  brain history: ${brainGit.enabled() ? 'on — every agent write is committed to ' + BRAIN + ' (git log to review, git revert to undo)' : 'OFF'}`);
   const rl = loadRoutines(); const nx = rl.filter(r => !r.paused && r.nextAt).sort((a, b) => a.nextAt - b.nextAt)[0];
   console.log(`  routines: ${rl.length} loaded${rl.some(r => r.paused) ? ' (' + rl.filter(r => r.paused).length + ' paused)' : ''}${nx ? ' · next ' + untilText(nx.nextAt) + ' ' + nx.title.toUpperCase() + ' (' + nx.agent + ')' : ''} · ${rlist.path}`);
-  setInterval(tickRoutines, 20000); tickRoutines(); // the clock: every 20 s; the first tick catches up anything missed while the office was off (once, marked LATE)
+  recoverTasks(); // before the clock: pick up what a crash or restart left mid-flight
+  if (CLOCK_ON) { setInterval(tickRoutines, 20000); tickRoutines(); } // the clock: every 20 s; the first tick catches up anything missed while the office was off (once, marked LATE)
+  else console.log('  clock: OFF (AO_CLOCK=off) — no routine will fire');
   console.log(`  agents: ${AGENTS.length} (${roster.customised} customised${roster.briefed ? ', ' + roster.briefed + ' briefed' : ''}${roster.files.length ? ' via ' + roster.files.join(' + ') : ''})   tools: ${backend === 'claude-cli' ? 'connected MCP servers' + (cfg.tools?.web === false ? '' : ' + web') : 'none on the API backend'}`);
   const sk = skills.summary(); const setup = setupMap(); const notYet = DEPT_KEYS.filter(k => !setup[k]);
   console.log(`  skills: ${sk.count} (${sk.shipped} shipped in skills/, ${sk.brain} in ${path.join(NOTES_DIR, 'skills')})${sk.problems.length ? '   ⚠ ' + sk.problems.length + ' problem' + (sk.problems.length > 1 ? 's' : '') + ' — see npm run check' : ''}`);

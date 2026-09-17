@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { writeJSON } from './store.mjs';
 
 export const ENDPOINT = 'https://api.anthropic.com/api/oauth/usage';
 export const WINDOW = 5 * 3600 * 1000;
@@ -48,7 +49,7 @@ export async function fetchUsage() {
 
 /* ---------- the office's own count (underneath): tokens this five-hour window ---------- */
 export const loadState = dataDir => { try { return JSON.parse(fs.readFileSync(stateFile(dataDir), 'utf8')); } catch { return {}; } };
-export function saveState(dataDir, st) { fs.mkdirSync(dataDir, { recursive: true }); fs.writeFileSync(stateFile(dataDir), JSON.stringify(st)); }
+export function saveState(dataDir, st) { fs.mkdirSync(dataDir, { recursive: true }); writeJSON(stateFile(dataDir), st, { pretty: false }); }
 export function windowState(st, now = Date.now()) {
   if (!st.startedAt || now - st.startedAt >= WINDOW) return { startedAt: null, tokens: 0, runs: 0 };
   return { startedAt: st.startedAt, tokens: st.tokens || 0, runs: st.runs || 0 };

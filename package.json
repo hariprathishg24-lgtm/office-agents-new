@@ -11,7 +11,8 @@
     "check:live": "CHECK_LIVE=1 node check.mjs",
     "graph": "node graph-build.mjs",
     "test": "node --test --test-concurrency=1 test/*.test.mjs",
-    "coverage": "node coverage.mjs"
+    "coverage": "node coverage.mjs",
+    "fixtures": "node fixtures.mjs"
   },
   "engines": {
     "node": ">=20"

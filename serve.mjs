@@ -233,11 +233,26 @@ async function rebuildGraph() {
   try { graph = await layoutGraph(BRAIN); } catch (e) { console.warn('brain graph failed:', e.message); }
   return graph;
 }
-function vaultIndex() { // name → text (vault notes + live office notes)
-  const { notes } = readVault(BRAIN); const m = new Map();
-  for (const [name, n] of notes) m.set(name, n.text);
-  for (const n of readOfficeNotes(BRAIN)) m.set(n.name, n.text);
+// A note marked superseded or archived stays in the brain (and the graph) as history, but is never
+// handed to an agent as a note to act on: "status: superseded" in its front matter, or the
+// "> **SUPERSEDED …" banner the office puts at the top of an old deliverable.
+const isSuperseded = text => /^---[\s\S]*?^status:\s*(superseded|archived)\b[\s\S]*?^---/mi.test(text.slice(0, 1500)) || /^>\s*\**\s*(SUPERSEDED|ARCHIVED)\b/m.test(text.slice(0, 2500));
+function vaultIndex() { // name → text (vault notes + live office notes); .meta: name → { path, client, superseded }
+  const { notes } = readVault(BRAIN); const m = new Map(); m.meta = new Map();
+  const add = (name, text, p, client = false) => { m.set(name, text); m.meta.set(name, { path: p, client, superseded: isSuperseded(text) }); };
+  for (const [name, n] of notes) add(name, n.text, n.path);
+  for (const n of readOfficeNotes(BRAIN)) add(n.name, n.text, n.path, !!n.client);
   return m;
+}
+// Which version of which note informed a result: the path, when it last changed, a hash of exactly
+// what the agent was given, and why it was picked. Kept on the task, so a result can be audited
+// against the notes as they were, not as they are now.
+function sourcesOf(index, names, why) {
+  return names.filter(n => index.has(n)).map(n => {
+    const meta = index.meta?.get(n) || {}; let modified = null;
+    try { modified = fs.statSync(meta.path).mtime.toISOString(); } catch {}
+    return { note: n, path: meta.path ? path.relative(BRAIN, meta.path).replace(/\\/g, '/') : null, modified, hash: hash(index.get(n)), why };
+  });
 }
 // The notes EVERY agent must have in front of it, whatever the task is about. These were left to
 // the relevance search, which meant an agent could be asked to quote a client and never be shown
@@ -288,8 +303,11 @@ function relevantNotes(index, dept, text, n = 4) {
   const scored = [];
   for (const [name, txt] of index) {
     if (CORE_NOTES.includes(name) || name === 'log') continue; // already in every prompt
+    const meta = index.meta?.get(name) || {};
+    if (meta.superseded) continue; // history, not instructions
     const hay = (name + ' ' + txt.slice(0, 1500)).toLowerCase();
-    let s = 0; for (const w of words) if (hay.includes(w)) s += name.toLowerCase().includes(w) ? 3 : 1;
+    let s = 0, named = false; for (const w of words) if (hay.includes(w)) { const inName = name.toLowerCase().includes(w); named ||= inName; s += inName ? 3 : 1; }
+    if (meta.client && !named) continue; // a client's record goes only to a task that names that client, not to whatever shares a word with it
     if (name === mocName) s += 2;
     if (s) scored.push([s, name]);
   }
@@ -331,7 +349,7 @@ async function run(task, feedback, mode, { onToolUse } = {}) {
   const read = relevantNotes(index, a.department, task.title + ' ' + task.text);
   const system = `You are ${a.name}, ${a.role || 'an agent'}, in the ${d.name} department of ${cfg.name}. ${a.does}\n${agentBrief(a)}` +
     'Write the finished deliverable itself, not a description of what you would do. Plain text: a short heading, then short sections or bullets. ' +
-    'At most 260 words unless a skill or the owner\'s instructions set a different shape — those win. No preamble, no sign-off. Ground it in the company notes below; where a fact is missing, make a reasonable assumption and mark it (assumed). ' +
+    'At most 260 words unless a skill or the owner\'s instructions set a different shape — those win. No preamble, no sign-off. Ground it in the company notes below; where a fact is missing, say plainly that it is missing — never invent a figure, price, client, result or policy to fill the gap. ' +
     'If you used a tool, say so in one line at the end ("Used: Gmail — searched the client thread").\n\n' +
     `${mcp.promptText(a.tools)}\n\n${NOTES_HEADER}\n\n${businessContext(index)}\n\nNOTES YOU READ FOR THIS TASK\n${contextText(index, read)}`;
   const routineLine = task.routine ? `\nThis is a routine (${task.when}): it runs on the office's own clock and the owner is not at the keyboard. It is now ${new Date().toLocaleString([], { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })}${task.late ? `; this run is late, it was due ${new Date(task.due).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}` : ''}. Do the work for now.` : '';
@@ -344,7 +362,8 @@ async function run(task, feedback, mode, { onToolUse } = {}) {
   const eff = effortFor({ task: task.effort, routine: task.routineEffort, agent: a.effort, office: cfg.effort, model: pick.model }); // same places, then the model's own
   const { text, tools, blocked, modelId: ran } = await askX(system, user, { model: pick.model, effort: eff.effort, onToolUse });
   if (!text) throw Object.assign(new Error('Claude returned nothing'), { phase: 'empty', toolsAttempted: tools.length + blocked.length });
-  return { result: text, read, tools: toolKeys(tools), used: mcp.namesOf(tools), blocked: mcp.namesOf(blocked).length ? mcp.namesOf(blocked) : blocked, skills: skills.names(a), modelUsed: pick.model, modelFrom: pick.from, modelId: ran, effortUsed: eff.effort || '', effortFrom: eff.from };
+  const sources = [...sourcesOf(index, CORE_NOTES, 'core'), ...sourcesOf(index, read, 'relevant')];
+  return { result: text, read, sources, tools: toolKeys(tools), used: mcp.namesOf(tools), blocked: mcp.namesOf(blocked).length ? mcp.namesOf(blocked) : blocked, skills: skills.names(a), modelUsed: pick.model, modelFrom: pick.from, modelId: ran, effortUsed: eff.effort || '', effortFrom: eff.from };
 }
 function writeNote(task) { // the deliverable becomes a note in the brain, linked to what was read
   fs.mkdirSync(NOTES_DIR, { recursive: true });
@@ -486,7 +505,7 @@ async function execute(id, attemptId, { feedback } = {}) {
   const a = t.attempts.find(x => x.id === attemptId); a.endedAt = Date.now(); delete t.attempt;
   if (out) {
     a.outcome = 'ok';
-    Object.assign(t, { read: out.read, tools: [...new Set([...(t.tools || []), ...out.tools])], used: [...new Set([...(t.used || []), ...out.used])], blocked: out.blocked, skills: out.skills, error: false, modelUsed: out.modelUsed, modelFrom: out.modelFrom, modelId: out.modelId, effortUsed: out.effortUsed, effortFrom: out.effortFrom });
+    Object.assign(t, { read: out.read, sources: out.sources, tools: [...new Set([...(t.tools || []), ...out.tools])], used: [...new Set([...(t.used || []), ...out.used])], blocked: out.blocked, skills: out.skills, error: false, modelUsed: out.modelUsed, modelFrom: out.modelFrom, modelId: out.modelId, effortUsed: out.effortUsed, effortFrom: out.effortFrom });
     delete t.lastError;
     if (at.mode === 'approve') { t.result = t.approval.draft + '\n\n---\nAFTER YOUR OK\n' + out.result; t.approved = true; t.approvedAt = t.approval.approvedAt; t.state = 'done'; t.doneAt = Date.now(); }
     else if (at.mode === 'draft') { t.result = out.result; t.draft = out.result; t.draftHash = hash(out.result); t.waitingAt = Date.now(); t.state = 'waiting'; t.ask = routines.askLine(t); }

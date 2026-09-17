@@ -16,6 +16,7 @@ Phases 0–2 of the reliability handoff, plus the prompt-honesty part of Phase 3
 - **This machine only.** The server listens on 127.0.0.1 (`AO_HOST` to change). Posts from other websites and foreign Host headers get 403.
 - **Launcher.** `start-office.cmd` checks that an office actually answers on 4520 and restarts crashes with backoff (up to 5 quick restarts). The log is capped at 5 MB. Its comment no longer claims a Scheduled Task that was never registered.
 - **Checks never touch real state.** `npm run check` runs its server with a scratch data folder and the clock off. The tests use `AO_DATA`, `AO_BRAIN`, `AO_CLAUDE` (a fake CLI), `AO_CLOCK=off`, `AO_USAGE=off`, `AO_TIMEOUT_MS`.
+- **Knowledge that can be trusted (Phase 3).** Client records under `Agents Office/Clients/**` are indexed. Archive, sample, demo and template folders are skipped, and a client's record goes only to a task that names that client. A note with `status: superseded` / `archived` in its front matter, or the `> **SUPERSEDED` banner, stays in the brain as history but is never handed to an agent. Every task records `sources`: each note's path, last change, content hash and why it was picked (core or relevant). Agents are now told to name a missing fact instead of "making a reasonable assumption", matching the brain's own rules. `npm test` gains 6 knowledge checks.
 - A folder named like a note inside `Agents Office/` no longer makes every task fail. Notes record the model that did the work, not the first model the CLI listed.
 
 ## 3.6.1-beta.1 — 9 Sep 2026

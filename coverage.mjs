@@ -65,6 +65,7 @@ export function coverage({ agents, skills, brainPath, lessons = () => 0, usableT
     const fx = path.join(fixtures, a.id);
     const cases = FIXTURE_CASES.filter(c => fs.existsSync(path.join(fx, c + '.md')));
     let review = null; try { review = JSON.parse(fs.readFileSync(path.join(fx, 'review.json'), 'utf8')); } catch {}
+    let lastRun = null; try { const runs = fs.readdirSync(fx).filter(n => /^results-.*\.json$/.test(n)).sort(); if (runs.length) { const r = JSON.parse(fs.readFileSync(path.join(fx, runs.at(-1)), 'utf8')); lastRun = { file: runs.at(-1), at: r.at, passed: r.passed, live: r.live }; } } catch {}
     const reviewCurrent = !!(review && review.passed === true && contract.hash && review.contractHash === contract.hash);
     const level = contract.complete && cases.length === FIXTURE_CASES.length && reviewCurrent ? 'tested'
       : contract.complete ? 'contracted'
@@ -75,11 +76,12 @@ export function coverage({ agents, skills, brainPath, lessons = () => 0, usableT
     if (!contract.exists) gaps.push('no capability contract');
     else if (!contract.complete) gaps.push('contract incomplete: ' + [...contract.missing, ...contract.empty].join(', '));
     const noCases = FIXTURE_CASES.filter(c => !cases.includes(c)); if (noCases.length) gaps.push('no fixture: ' + noCases.join(', '));
+    if (cases.length && !lastRun) gaps.push('fixture checks never run (node fixtures.mjs ' + a.id + ')'); else if (lastRun && !lastRun.passed) gaps.push('last fixture run failed its checks');
     if (review && !reviewCurrent) gaps.push(review.passed !== true ? 'last review did not pass' : 'review is for an older contract');
     else if (!review) gaps.push('never reviewed');
     const dead = tools.filter(t => t.usable === false).map(t => t.name); if (dead.length) gaps.push('tools not connected: ' + dead.join(', '));
     return { id: a.id, department: a.department, lead: !!a.lead, name: a.name, role: a.role, level, firstClient: FIRST_CLIENT[a.id] || null,
-      brief: brief.length, skills: { specific, shared }, lessons: lessons(a.id), contract: { exists: contract.exists, complete: contract.complete }, fixtures: cases, reviewed: reviewCurrent, tools, gaps };
+      brief: brief.length, skills: { specific, shared }, lessons: lessons(a.id), contract: { exists: contract.exists, complete: contract.complete }, fixtures: cases, lastRun, reviewed: reviewCurrent, tools, gaps };
   });
   const by = LEVELS.map(l => [l, roles.filter(r => r.level === l).length]);
   const first = roles.filter(r => r.firstClient);
@@ -93,7 +95,7 @@ export function summaryText(c) {
   return lines.join('\n');
 }
 
-if (import.meta.url === `file://${process.argv[1].replace(/\\/g, '/').replace(/^\/?/, '/')}` || process.argv[1]?.endsWith('coverage.mjs')) {
+if (process.argv[1] && path.basename(process.argv[1]) === 'coverage.mjs') { // run directly (npm run coverage), not imported
   const { loadConfig, ROOT } = await import('./config.mjs');
   const { loadRoster } = await import('./roster.mjs');
   const { loadSkills } = await import('./skills.mjs');

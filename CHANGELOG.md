@@ -41,6 +41,11 @@ Phases 0–2 of the reliability handoff, plus the prompt-honesty part of Phase 3
   - Server side: one office per data folder (a lock; a dead office's lock is taken over). A heartbeat that detects sleep. A clean stop that ends running Claude processes, records what was cut off and releases the lock; the next start recovers it. Every failure is recorded with its cause.
   - `scripts/install-autostart.ps1` registers, checks (`-Check`) or removes (`-Uninstall`) a logon Scheduled Task: runs as the owner, restarts on failure, never starts a second copy. It is not registered; that is the owner's call.
   - `npm test` gains 5 ops checks (67 total), and the browser drill covers `/ops` on desktop and phone, and pause from a phone.
+- **Capability contracts for the first-client seats (Phase 4).** PROSPECTOR, LEAD ENRICHER, INBOUND LEADS MANAGER, SALES LEAD, FOLLOW UPS, CLIENT EMAILS, PROPOSALS, QA, DELIVERY LEAD and PROJECT CO-ORDINATOR each have a complete contract in `<brain>/Agents Office/contracts/` and three fixture cases (normal, missing input, misleading input). All are drawn from the approved notes and skills; every undecided point says *not established*, and every tool that is not connected is named.
+  - `node fixtures.mjs <id | first-client>` runs a seat's cases in a throwaway office where nothing can be sent. The checks are deterministic: expected state, required and forbidden phrases, every price on the offer ladder, no claimed past work, no claimed send. The answers are saved for the owner.
+  - Only `POST /api/coverage/<id>/review` with `"approvedBy": "owner"` makes a seat "tested". It needs a complete contract and a recorded run, and it is tied to the contract's hash. `GET /api/coverage` reports all 119 seats.
+  - A task can be given straight to a named agent (`agent` on `POST /api/tasks`), with no routing call.
+  - Coverage now: 55 generic, 54 briefed, 10 contracted, 0 tested. The live fixture run has not happened yet: the plan session was at 89% on 17 Sep 2026.
 - A folder named like a note inside `Agents Office/` no longer makes every task fail. Notes record the model that did the work, not the first model the CLI listed.
 
 ## 3.6.1-beta.1 — 9 Sep 2026

@@ -51,6 +51,7 @@ import * as coord from './coordinator.mjs';
 import * as acq from './acquisition.mjs';
 import * as research from './research.mjs';
 import * as ops from './ops.mjs';
+import * as coverageMod from './coverage.mjs';
 
 const cfg = loadConfig();
 const HTML = path.join(ROOT, 'dist', 'command-centre-v2.html'); // built by build.mjs; shipped so npm start works without a build
@@ -979,10 +980,12 @@ const server = http.createServer(async (req, res) => {
       editRoutine(r.id, patch); return json(res, 200, { ok: true, routines: loadRoutines() });
     }
     if (url.pathname === '/api/tasks' && req.method === 'POST') {
-      const { dept, text, model, effort, after, goal } = await body(req);
+      const { dept, text, model, effort, after, goal, agent: named, needsOk: saysOk } = await body(req);
       if (!DEPTS[dept] || dept === 'brain') return json(res, 400, { error: 'unknown department' });
       if (!text || !String(text).trim()) return json(res, 400, { error: 'empty task' });
-      const r = await route(dept, String(text).trim());
+      const direct = named && AGENTS.find(a => a.id === named && a.department === dept); // given to a named agent: no routing call
+      if (named && !direct) return json(res, 400, { error: `${named} is not an agent in ${dept}` });
+      const r = direct ? { agent: direct.id, title: String(text).trim().split(/(?<=[.!?])\s|\n/)[0].slice(0, 90), plan: [], eta: 15, why: 'assigned by name', needsOk: typeof saysOk === 'boolean' ? saysOk : routines.guessNeedsOk(text) } : await route(dept, String(text).trim());
       // needsOk is the router's judgement and it is kept: a task typed into the bar that sends, posts or
       // pays now drafts first and waits for the OK, exactly like a routine does
       const task = newTask({ dept, agent: r.agent, title: r.title, text: String(text).trim(), plan: r.plan, why: r.why, needsOk: r.needsOk, after: Array.isArray(after) ? after.map(String) : [], goal: goal ? String(goal).slice(0, 80) : undefined, model: normModel(model) || undefined, effort: normEffort(effort) || undefined }); // model/effort: set on this task (beats routine, agent, office)
@@ -996,6 +999,21 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/research/rollback' && req.method === 'POST') { const b = await body(req); const st = research.loadState(DATA); const r = research.rollback(st, { brainPath: BRAIN, skill: b.skill, why: String(b.why || '') }); if (r.error) return json(res, r.status, { error: r.error }); research.saveState(DATA, st); refreshSkills(); brainGit.snapshot('research: rolled back ' + b.skill); console.log('  ↺ research rule rolled back from ' + b.skill); return json(res, 200, r); }
     const rp = url.pathname.match(/^\/api\/research\/findings\/([a-f0-9]{16})\/publish$/);
     if (rp && req.method === 'POST') { const b = await body(req); const st = research.loadState(DATA); const r = research.publish(st, { brainPath: BRAIN, shippedDir: path.join(ROOT, 'skills'), key: rp[1], skill: b.skill, rule: b.rule, approvedBy: b.approvedBy, tested: b.tested }); if (r.error) return json(res, r.status, { error: r.error }); research.saveState(DATA, st); refreshSkills(); brainGit.snapshot('research: published a rule to ' + r.published.skill); console.log('  ★ research rule published to ' + r.published.skill + ' v' + r.published.version); return json(res, 200, r); }
+    if (url.pathname === '/api/coverage' && req.method === 'GET') { refreshSkills(); return json(res, 200, coverageMod.coverage({ agents: AGENTS, skills, brainPath: BRAIN, lessons: id => learn.count(BRAIN, id) })); }
+    const cr = url.pathname.match(/^\/api\/coverage\/([a-z0-9_-]+)\/review$/);
+    if (cr && req.method === 'POST') { // the owner's review of a seat's fixture answers: the only thing that makes a seat "tested"
+      const b = await body(req);
+      if (b.approvedBy !== 'owner') return json(res, 403, { error: 'only the owner reviews a seat: send "approvedBy": "owner"' });
+      if (typeof b.passed !== 'boolean') return json(res, 400, { error: 'say whether the answers passed: {"passed": true|false, "notes": "…"}' });
+      const id = cr[1], fx = path.join(BRAIN, 'Agents Office', 'fixtures', id), cf = path.join(BRAIN, 'Agents Office', 'contracts', id + '.md');
+      let contract; try { contract = fs.readFileSync(cf, 'utf8'); } catch { return json(res, 409, { error: 'this seat has no capability contract to review against' }); }
+      if (!coverageMod.checkContract(contract).complete) return json(res, 409, { error: 'the contract is incomplete — finish it before reviewing' });
+      const runs = fs.existsSync(fx) ? fs.readdirSync(fx).filter(n => /^results-.*\.json$/.test(n)).sort() : [];
+      if (!runs.length) return json(res, 409, { error: 'run the fixtures first (node fixtures.mjs ' + id + ') — a review needs answers to read' });
+      const review = { contractHash: hash(contract), resultsFile: runs.at(-1), passed: b.passed, notes: String(b.notes || '').slice(0, 1000), reviewedBy: 'owner', reviewedAt: new Date().toISOString() };
+      fs.writeFileSync(path.join(fx, 'review.json'), JSON.stringify(review, null, 2)); brainGit.snapshot('review: ' + id + (b.passed ? ' passed' : ' failed'));
+      return json(res, 200, { ok: true, review });
+    }
     if (url.pathname === '/api/pipeline' && req.method === 'GET') return json(res, 200, acq.summary(acq.loadPipeline(DATA), acq.loadConstraints(BRAIN)));
     if (url.pathname === '/api/pipeline/advance' && req.method === 'POST') return json(res, 200, pipelineAdvance());
     const pm = url.pathname.match(/^\/api\/pipeline\/([^/]+)\/mark$/);

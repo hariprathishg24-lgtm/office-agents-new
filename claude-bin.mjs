@@ -55,9 +55,14 @@ export function claudeBin(cfg = {}) {
 }
 /** Spawn the CLI. A .mjs/.js "binary" (the tests' fake Claude, via AO_CLAUDE) runs under this Node,
  *  because Windows cannot execute a script file directly. */
+// windowsHide: the child gets its own hidden console instead of sharing ours. Without it an office
+// running with no console of its own (a Scheduled Task, or a launcher whose window is gone) attaches
+// to the console Windows creates for the CLI, and is sent CTRL_CLOSE — arriving as SIGHUP — the moment
+// that child exits. The office then stopped itself about fifteen seconds after every headless start.
 export function spawnClaude(bin, args, opts) {
-  if (/\.(mjs|cjs|js)$/i.test(bin || '')) return spawn(process.execPath, [bin, ...args], opts);
-  return spawn(bin || 'claude', args, opts);
+  const o = { windowsHide: true, ...opts };
+  if (/\.(mjs|cjs|js)$/i.test(bin || '')) return spawn(process.execPath, [bin, ...args], o);
+  return spawn(bin || 'claude', args, o);
 }
 /** How the office found it, for the boot banner. */
 export function claudeSource(cfg = {}) {

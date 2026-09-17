@@ -157,6 +157,7 @@ async function askX(system, user, { dept = null, maxTokens = 4000, tools = true,
     bumpUsage(res.usage);
     return { text: res.content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim(), tools: [], blocked: [], usage: res.usage, modelId: res.model };
   }
+  if (!claudeBin(cfg)) throw runError(process.env.AO_CLAUDE || cfg.claudePath ? `Claude Code was not found at the configured path (${process.env.AO_CLAUDE || cfg.claudePath})` : 'Claude Code is not installed (claude not found on PATH or in the editor extension)', { phase: 'spawn', toolsAttempted: 0, partial: '' });
   fs.mkdirSync(CLI_CWD, { recursive: true });
   const allowed = tools ? mcp.allowedTools(dept) : []; // only the connectors wired to this agent's department (office.config.json mcp.departments widens them)
   // The message goes in over stdin and the system prompt as a file, so the command line stays short
@@ -267,7 +268,10 @@ function sourcesOf(index, names, why) {
   return names.filter(n => index.has(n)).map(n => {
     const meta = index.meta?.get(n) || {}; let modified = null;
     try { modified = fs.statSync(meta.path).mtime.toISOString(); } catch {}
-    return { note: n, path: meta.path ? path.relative(BRAIN, meta.path).replace(/\\/g, '/') : null, modified, hash: hash(index.get(n)), why };
+    // effective: when the note says it took effect — "effective: 2026-09-16" in front matter, or "Approved/Settled <date>" in the text
+    const text = index.get(n);
+    const eff = (text.match(/^effective:\s*(\d{4}-\d{2}-\d{2})/m) || [])[1] || (() => { const m = text.match(/\b(?:approved|settled|decided|agreed)\b[^.\n]{0,40}?\b(\d{1,2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{4})/i); const d = m && Date.parse(m[1]); return d ? new Date(d - new Date(d).getTimezoneOffset() * 6e4).toISOString().slice(0, 10) : null; })();
+    return { note: n, path: meta.path ? path.relative(BRAIN, meta.path).replace(/\\/g, '/') : null, modified, effective: eff, hash: hash(text), why };
   });
 }
 // The notes EVERY agent must have in front of it, whatever the task is about. These were left to
@@ -1157,6 +1161,7 @@ function opsSummary() {
     usage: usageCache.value, pipeline: (({ active, missing, counts, file }) => ({ active, missing, counts, file }))(acq.summary(acq.loadPipeline(DATA), acq.loadConstraints(BRAIN))),
     research: research.stats(research.loadState(DATA), research.loadConfig(BRAIN)),
     freshness: index ? ops.freshness(index, CORE_NOTES) : [],
+    seats: (() => { try { const c = coverageMod.coverage({ agents: AGENTS, skills, brainPath: BRAIN }); return { levels: c.levels, firstClient: c.list.filter(r => r.firstClient || r.level !== 'generic' && r.level !== 'briefed').map(r => ({ id: r.id, name: r.name, level: r.level, gaps: r.gaps })) }; } catch { return null; } })(), // readiness: a seat is only "tested" after the owner's review
   };
 }
 // A clean stop (Ctrl+C in the launcher window, or a service stop): no new work, running Claude

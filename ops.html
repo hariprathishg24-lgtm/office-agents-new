@@ -56,6 +56,7 @@
   <section><h2>Industry research</h2><div id="research" class="muted">—</div></section>
   <section><h2>Company notes — last changed</h2><ul id="fresh"><li class="empty">—</li></ul></section>
   <section><h2>Readiness</h2><ul id="ready"><li class="empty">—</li></ul></section>
+  <section class="wide"><h2>Seats — how far each is proved</h2><div id="seatlevels" class="muted"></div><ul id="seats"><li class="empty">—</li></ul></section>
 </main>
 <script>
 const $ = id => document.getElementById(id);
@@ -94,6 +95,7 @@ async function refresh() {
   const pl = o.pipeline; $('pipeline').innerHTML = pl.active ? `<span class="ok">Active.</span> ${Object.entries(pl.counts).map(([k, v]) => `${esc(k)} ${v}`).join(' · ') || 'no prospects yet'}` : `<b>Off.</b> Not set: ${esc(pl.missing.join(', '))}. These limits are yours to decide, in <code>${esc(pl.file)}</code>.`;
   const rs = o.research; $('research').innerHTML = rs.active ? `<span class="ok">Active.</span> ${rs.budget.used} of ${rs.budget.limit} runs this week · ${rs.accepted} accepted · ${rs.published} published · ${rs.blocked} blocked · ${rs.rejected} rejected${rs.gaps.length ? ' · <span class="bad">' + rs.gaps.length + ' gap(s)</span>' : ''}` : `<b>Off.</b> Not set: ${esc(rs.missing.join(', '))}, in <code>${esc(rs.file)}</code>.`;
   $('fresh').innerHTML = o.freshness.map(f => `<li>${esc(f.note)} — <span class="${f.stale ? 'bad' : 'muted'}">${f.days === null ? 'unknown' : f.days === 0 ? 'today' : f.days + ' days ago'}${f.stale ? ' · check it is still true' : ''}</span></li>`).join('') || '<li class="empty">—</li>';
+  if (o.seats) { const L = o.seats.levels; $('seatlevels').textContent = `119 seats: ${L.tested} tested · ${L.contracted} contracted · ${L.briefed} briefed · ${L.generic} generic. Tested needs your review of the fixture answers.`; $('seats').innerHTML = o.seats.firstClient.map(r => `<li><b>${esc(r.name)}</b> <span class="kind ${r.level === 'tested' ? '' : 'medium'}">${esc(r.level)}</span> <span class="muted">${esc(r.gaps.join('; ') || 'nothing missing')}</span></li>`).join(''); }
   $('ready').innerHTML = o.ready.checks.map(x => `<li><span class="${x.ok ? 'ok' : 'bad'}">${x.ok ? '✓' : '✗'}</span> ${esc(x.name)}${x.detail ? ' — <span class="muted">' + esc(x.detail) + '</span>' : ''}</li>`).join('');
 }
 $('pause').addEventListener('click', async () => {

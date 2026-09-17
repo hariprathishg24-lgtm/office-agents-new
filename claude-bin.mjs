@@ -50,7 +50,7 @@ let cached = null;
 export function claudeBin(cfg = {}) {
   if (cached !== null) return cached;
   const explicit = process.env.AO_CLAUDE || cfg.claudePath;
-  if (explicit && fs.existsSync(explicit)) return (cached = explicit);
+  if (explicit) return (cached = fs.existsSync(explicit) ? explicit : null); // a configured path that is missing is a problem to report, not a reason to run some other claude
   return (cached = onPath() || bundled() || null);
 }
 /** Spawn the CLI. A .mjs/.js "binary" (the tests' fake Claude, via AO_CLAUDE) runs under this Node,

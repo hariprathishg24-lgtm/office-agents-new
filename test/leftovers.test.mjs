@@ -8,6 +8,32 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { scratch, startOffice, sleep } from './helpers.mjs';
 
+describe('execution and knowledge edges', () => {
+  test('a configured Claude path that does not exist is a clear spawn failure, never another binary', async () => {
+    const s = scratch('nobin');
+    const office = await startOffice({ brain: s.brain, data: s.data, env: { AO_CLAUDE: path.join(s.dir, 'no-such-claude.exe') } });
+    try {
+      const t = (await office.api('POST', '/api/tasks', { dept: 'sales', agent: 'lexi', text: 'list the leads', needsOk: false })).body;
+      const r = (await office.api('POST', `/api/tasks/${t.id}/run`)).body;
+      assert.equal(r.error, true); assert.match(r.result, /not found at the configured path/);
+      assert.equal(r.attempts[0].cause, 'spawn');
+      assert.ok((await office.api('GET', '/api/ops')).body.problems.some(p => p.kind === 'spawn'));
+    } finally { await office.stop(); s.cleanup(); }
+  });
+
+  test('a core note over its budget is cut with an explicit omission, and its effective date is recorded', async () => {
+    const s = scratch('budget');
+    fs.writeFileSync(path.join(s.brain, '10-Business', 'offer-ladder.md'), '# Offer ladder\nApproved by the owner, 16 Sep 2026.\n' + 'A long line about the fixture offer, repeated.\n'.repeat(300));
+    const office = await startOffice({ brain: s.brain, data: s.data, env: { FAKE_PROBE: '[CUT: the rest of offer-ladder.md' } });
+    try {
+      const t = (await office.api('POST', '/api/tasks', { dept: 'sales', agent: 'lexi', text: 'list the budget leads', needsOk: false })).body;
+      const r = (await office.api('POST', `/api/tasks/${t.id}/run`)).body;
+      assert.equal(office.calls().find(c => c.request === 'list the budget leads').probe, true, 'the cut is named in the prompt');
+      assert.equal(r.sources.find(x => x.note === 'offer-ladder').effective, '2026-09-16');
+    } finally { await office.stop(); s.cleanup(); }
+  });
+});
+
 describe('authority and resilience', () => {
   let s, office;
   before(async () => {

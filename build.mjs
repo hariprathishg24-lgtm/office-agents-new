@@ -2,6 +2,7 @@
 import { build } from 'esbuild';
 import { readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { buildBrainGraph } from './graph-build.mjs';
+import { localBuildFiles } from './scripts/local-build-files.mjs';
 await buildBrainGraph(); // V3.6: bake the vault's wiki-link graph into src/braingraph.js
 
 const res = await build({
@@ -11,6 +12,9 @@ const res = await build({
   minify: true,
   write: false,
   target: 'es2020',
+  // Restricted Windows environments may deny esbuild's ancestor-directory scanning.
+  // This opt-in resolver reads only this checkout through Node, without widening access.
+  plugins: process.env.AO_BUILD_LOCAL_FILES === '1' ? [localBuildFiles()] : [],
 });
 const js = res.outputFiles[0].text;
 const shell = readFileSync('src/shell.html', 'utf8');

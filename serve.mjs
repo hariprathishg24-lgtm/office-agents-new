@@ -65,9 +65,17 @@ const RUN_TIMEOUT = +process.env.AO_TIMEOUT_MS || Math.max(60, +cfg.timeout || 3
 const CLOCK_ON = process.env.AO_CLOCK !== 'off';   // off: routines never fire (npm run check, the tests) — the clock must not run real work against real state
 const USAGE_ON = process.env.AO_USAGE !== 'off';   // off: no call to Claude's usage endpoint
 const HOST = process.env.AO_HOST || cfg.host || '127.0.0.1'; // this machine only: the API has no login, and it can approve outbound sends
+// Claim before connector discovery or any startup work can touch shared state.
+{
+  const lock = await ops.acquireLock(DATA, { port: cfg.port, host: HOST });
+  if (!lock.ok) { console.error(`✗ office lock prevents startup on ${DATA}: another office may already be running (pid ${lock.holder.pid}, port ${lock.holder.port}). ${lock.reason || 'Stop the other office before starting this one.'}`); process.exit(1); }
+  if (lock.tookOver) console.log(`  lock: the previous office (pid ${lock.tookOver.pid}) did not shut down cleanly — taking over`);
+}
+process.on('exit', () => ops.releaseLock(DATA));
 const STARTED = Date.now();
 const CHILDREN = new Set(); // running Claude processes
-const MAX_ATTEMPTS = 3; // a task interrupted by a restart is picked up again at most this many times in total
+const MAX_ATTEMPTS = 3; // a task is attempted at most this many times in total (restarts and read-only retries included)
+const RETRY_BASE = +process.env.AO_RETRY_BASE_MS || 60 * 1000; // first backoff for a read-only retry; each next one waits 4x longer
 { const m = normModel(cfg.model); if (cfg.model && !m) console.warn(`config: model must be sonnet, opus or fable (got "${cfg.model}") — using ${DEFAULT_MODEL}`); cfg.model = m || DEFAULT_MODEL; } // V3.6: three models, by name
 { const e = normEffort(cfg.effort); if (cfg.effort && !e) console.warn(`config: effort must be low, medium, high, xhigh or max (got "${cfg.effort}") — using the model's own`); cfg.effort = e || ''; } // V3.6.1: the office's effort, empty = the model's own
 mcp.configure(cfg);
@@ -137,7 +145,7 @@ function fitSystem(system) {
 //   toolsAttempted how many tool calls the agent had started — 0 means nothing outside this machine can have happened
 //   partial        any text the agent produced before it failed (useful, but not a finished result)
 function runError(message, fields) { return Object.assign(new Error(message), fields); }
-async function askX(system, user, { maxTokens = 4000, tools = true, timeout = RUN_TIMEOUT, model = cfg.model, effort = null, images = [], onToolUse = null } = {}) { // model: sonnet · opus · fable · effort: low…max or null = the model's own (src/models.js)
+async function askX(system, user, { dept = null, maxTokens = 4000, tools = true, timeout = RUN_TIMEOUT, model = cfg.model, effort = null, images = [], onToolUse = null } = {}) { // model: sonnet · opus · fable · effort: low…max or null = the model's own (src/models.js)
   if (sdk) {
     const content = images.length
       ? [...images.map(im => ({ type: 'image', source: { type: 'base64', media_type: im.media_type, data: im.data } })), { type: 'text', text: user }]
@@ -150,7 +158,7 @@ async function askX(system, user, { maxTokens = 4000, tools = true, timeout = RU
     return { text: res.content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim(), tools: [], blocked: [], usage: res.usage, modelId: res.model };
   }
   fs.mkdirSync(CLI_CWD, { recursive: true });
-  const allowed = tools ? mcp.allowedTools() : [];
+  const allowed = tools ? mcp.allowedTools(dept) : []; // only the connectors wired to this agent's department (office.config.json mcp.departments widens them)
   // The message goes in over stdin and the system prompt as a file, so the command line stays short
   // whatever the size of the brain (CreateProcess stops at 32,767 characters).
   const sysFile = path.join(CLI_CWD, `system-${process.pid}-${nid()}.txt`);
@@ -364,13 +372,13 @@ async function run(task, feedback, mode, { onToolUse } = {}) {
     `${mcp.promptText(a.tools)}\n\n${NOTES_HEADER}\n\n${businessContext(index)}\n\nNOTES YOU READ FOR THIS TASK\n${contextText(index, read)}`;
   const routineLine = task.routine ? `\nThis is a routine (${task.when}): it runs on the office's own clock and the owner is not at the keyboard. It is now ${new Date().toLocaleString([], { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })}${task.late ? `; this run is late, it was due ${new Date(task.due).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}` : ''}. Do the work for now.` : '';
   const modeLine = mode === 'draft' ? '\nPrepare everything, but send, post, pay or change NOTHING outside this machine: the owner reads this first and approves it. End with one line saying exactly what will go out when approved. If it turns out nothing needs to go out (nothing found, nobody to contact), make the FIRST line exactly "NOTHING TO SEND", then say briefly what you checked — that is a finished report, not something for the owner to approve.'
-    : mode === 'approve' ? `\nThe owner has APPROVED the draft below. Carry out the outbound step now, exactly as drafted, with your tools (send, post, update). If a tool you need is not connected, say so and show what you would have sent. Then report in one short section: what went out, to whom, and anything that did not. Do not hand off or ask anything in this step. If the tool gave back an id or a link for what went out (a message id, a post URL), end with one line "REF: <it>".\nApproved draft:\n${withoutControlLines(task.approval.draft)}`
+    : mode === 'approve' ? `\nThe owner has APPROVED the draft below. Carry out the outbound step now, exactly as drafted, with your tools (send, post, update). If a tool you need is not connected, say so and show what you would have sent. Then report in one short section: what went out, to whom, and anything that did not. Do not hand off or ask anything in this step.${task.approval.recipient ? ` Send ONLY to ${task.approval.recipient}: the owner approved that recipient and no other.` : ''} If the tool gave back an id or a link for what went out (a message id, a post URL), end with one line "REF: <it>".\nApproved draft:\n${withoutControlLines(task.approval.draft)}`
     : '\nThis task was judged read-only: read, research and report. Send, post, pay, delete or change NOTHING outside this machine. If doing it properly needs an outbound step, draft that step and say it needs the owner\'s OK.';
   const user = `Task: ${task.title}\nOwner's request: ${task.text}` + (task.plan?.length ? `\nAgreed plan: ${task.plan.join(' → ')}` : '') + routineLine + modeLine +
     (feedback && mode !== 'approve' ? `\n\nThe owner reviewed your previous version and asked for changes: "${feedback}"\nPrevious version:\n${task.result}` : '');
   const pick = modelFor({ task: task.model, routine: task.routineModel, agent: a.model, office: cfg.model }); // four places, one precedence
   const eff = effortFor({ task: task.effort, routine: task.routineEffort, agent: a.effort, office: cfg.effort, model: pick.model }); // same places, then the model's own
-  const { text, tools, blocked, modelId: ran } = await askX(system, user, { model: pick.model, effort: eff.effort, onToolUse });
+  const { text, tools, blocked, modelId: ran } = await askX(system, user, { dept: a.department, model: pick.model, effort: eff.effort, onToolUse });
   if (!text) throw Object.assign(new Error('Claude returned nothing'), { phase: 'empty', toolsAttempted: tools.length + blocked.length });
   const sources = [...sourcesOf(index, CORE_NOTES, 'core'), ...sourcesOf(index, read, 'relevant')];
   return { result: text, read, sources, tools: toolKeys(tools), used: mcp.namesOf(tools), blocked: mcp.namesOf(blocked).length ? mcp.namesOf(blocked) : blocked, skills: skills.names(a), modelUsed: pick.model, modelFrom: pick.from, modelId: ran, effortUsed: eff.effort || '', effortFrom: eff.from };
@@ -401,7 +409,7 @@ async function chat(agentId, text, history, images = []) {
     'Use the company notes; say when something is not in them. If the owner asks you to look something up, use your tools. Nothing outbound is sent without the owner\'s explicit say-so.\n\n' +
     `${mcp.promptText(a.tools)}\n\n${NOTES_HEADER}\n\n${businessContext(index)}\n\nRELEVANT NOTES\n${contextText(index, read)}\n\nYOUR RECENT TASKS\n${mine || '—'}`;
   const convo = (history || []).slice(-8).map(m => `${m.who === 'user' ? 'Owner' : a.name}: ${m.text}`).join('\n');
-  const { text: reply, tools } = await askX(system, (convo ? convo + '\n' : '') + `Owner: ${text}\n${a.name}:`, { maxTokens: 1200, model: modelFor({ agent: a.model, office: cfg.model }).model, effort: effortFor({ agent: a.effort, office: cfg.effort, model: modelFor({ agent: a.model, office: cfg.model }).model }).effort , images });
+  const { text: reply, tools } = await askX(system, (convo ? convo + '\n' : '') + `Owner: ${text}\n${a.name}:`, { dept: a.department, maxTokens: 1200, model: modelFor({ agent: a.model, office: cfg.model }).model, effort: effortFor({ agent: a.effort, office: cfg.effort, model: modelFor({ agent: a.model, office: cfg.model }).model }).effort , images });
   return { reply, read, tools: toolKeys(tools), used: mcp.namesOf(tools) };
 }
 
@@ -508,7 +516,7 @@ function claim(id, action, { waitingAt } = {}) {
     if (!t.draft || hash(t.draft) !== t.draftHash) return { status: 409, error: 'the draft was edited after it was written — send it back for rework rather than approving an unchecked text', task: t };
   }
   const at = { id: nid(), action, mode: action === 'approve' ? 'approve' : modeFor(t), startedAt: Date.now() };
-  if (action === 'approve') { t.approval = { draft: t.draft, draftHash: t.draftHash, approvedAt: at.startedAt, attempt: at.id, scope: 'send this draft once, as written', review: t.review ? { agent: t.review.agent, verdict: t.review.verdict } : null }; delete t.sendStartedAt; }
+  if (action === 'approve') { t.approval = { draft: t.draft, draftHash: t.draftHash, recipient: ((t.draft.match(/^[\s>*]*TO:\s*(.+)$/im) || [])[1] || '').trim() || null, approvedAt: at.startedAt, attempt: at.id, scope: 'send this draft once, as written', review: t.review ? { agent: t.review.agent, verdict: t.review.verdict } : null }; delete t.sendStartedAt; }
   t.attempts = [...(t.attempts || []), at]; t.attempt = at.id;
   t.state = 'doing'; t.startedAt = at.startedAt; delete t.ask; t.because = `${action} (attempt ${at.id})`;
   save(list);
@@ -517,6 +525,7 @@ function claim(id, action, { waitingAt } = {}) {
 // the clock's path: claim at the moment the queue reaches the task (the page may have started it first)
 async function startQueued(id) {
   if (office.paused) return null; // stays next; resume queues it again
+  { const w = load().find(t => t.id === id); if (w?.retryAt && w.retryAt > Date.now() + 1000) { setTimeout(() => enqueue(() => startQueued(id)), w.retryAt - Date.now()).unref(); return w; } } // a retry waits for its backoff, even after a restart
   const c = claim(id, 'run');
   if (c.error) { if (c.status !== 404 && !RUNNING.includes(c.task?.state)) console.warn(`  ${id}: ${c.error}`); return c.task || null; }
   return execute(id, c.attempt.id);
@@ -617,6 +626,10 @@ async function execute(id, attemptId, { feedback } = {}) {
         result: t.approval.draft + `\n\n---\nAFTER YOUR OK — OUTCOME UNKNOWN\nThe agent started the send and then stopped reporting (${failure.message}). It may have gone out, in part or in full. It has NOT been retried and will not be. Check the connector (the sent folder, the post, the record) before doing anything else with this.` + (failure.partial ? `\n\nThe agent's last words:\n${failure.partial}` : '') });
     } else if (at.action === 'reject' && t.draft) {
       Object.assign(t, { state: 'waiting', waitingAt: Date.now(), error: false, because: 'rework failed', ask: `The rework of "${t.title}" failed (${failure.message}). The previous draft is still here — approve it as it is, or reject again.` });
+    } else if (at.mode === 'readonly' && serverRuns(t) && ['network', 'rate-limit'].includes(a.cause) && t.attempts.length < MAX_ATTEMPTS) {
+      const wait = RETRY_BASE * 4 ** (t.attempts.length - 1); // 1, then 4 minutes: read-only work only — nothing outbound is ever retried
+      Object.assign(t, { state: 'next', retryAt: Date.now() + wait, because: `${a.cause} failure — retry ${t.attempts.length} of ${MAX_ATTEMPTS - 1} in ${Math.round(wait / 1000)} s` });
+      setTimeout(() => enqueue(() => startQueued(t.id)), wait).unref();
     } else if (at.action === 'revise') {
       Object.assign(t, { state: 'done', error: false, because: 'revision failed' }); // the previous result stands; the failed revision is in lastError and the attempt
     } else {
@@ -770,6 +783,16 @@ function researchClock(now = Date.now()) { // weekly, on the owner's day and tim
   const today = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
   if (st.runs.some(r => r.startedAt >= today)) return;
   const r = researchRun({ by: 'clock' }); if (r.error) console.log(`  ◇ research not run: ${r.error}`);
+}
+function lessonDecisions() { // corrections waiting to become rules, and rules due a second look
+  const items = [];
+  for (const a of AGENTS) {
+    let l; try { l = learn.read(BRAIN, a.id); } catch { continue; }
+    const plain = line => line.replace(/^\d{4}-\d{2}-\d{2}\s*·\s*/, '').replace(/\s*←.*$/, '');
+    l.proposed.forEach((line, i) => items.push({ kind: 'proposed-rule', agent: a.id, index: i, decision: `${a.name}: make this a standing rule? "${plain(line)}"${/⚠/.test(line) ? ' — ' + line.slice(line.indexOf('⚠') + 1).trim() : ''}` }));
+    for (const r of l.reviewDue) items.push({ kind: 'rule-review', agent: a.id, decision: `${a.name}'s rule is over six months old — is it still right? "${plain(r)}"` });
+  }
+  return items;
 }
 function researchDecisions() {
   const items = []; let st; try { st = research.loadState(DATA); } catch { return items; }
@@ -950,6 +973,11 @@ const server = http.createServer(async (req, res) => {
       agents: agentsOut(), setup: setupMap(), routines: (l => ({ count: l.length, paused: l.filter(r => r.paused).length, depts: routines.ALLOWED }))(loadRoutines()), roster: { customised: roster.customised, briefed: roster.briefed, files: roster.files, problems: roster.problems }, skills: (({ count, shipped, brain, problems }) => ({ count, shipped, brain, problems }))(skills.summary()), tools: backend === 'claude-cli', mcp: mcp.summary(), clock: CLOCK_ON, host: HOST, paused: pausedNow() });
     if (url.pathname === '/api/agents') return json(res, 200, { agents: agentsOut(), problems: roster.problems, files: roster.files });
     if (url.pathname === '/api/skills') return json(res, 200, refreshSkills().summary()); // reloads from disk: edit a skill, hit this, see it
+    const lm = url.pathname.match(/^\/api\/lessons\/([a-z0-9_-]+)\/(confirm|dismiss)$/);
+    if (lm && req.method === 'POST') { const b = await body(req); const a = AGENTS.find(x => x.id === lm[1]); if (!a) return json(res, 404, { error: 'no such agent' });
+      if (b.approvedBy !== 'owner') return json(res, 403, { error: 'only the owner turns a correction into a rule: send "approvedBy": "owner"' });
+      const r = lm[2] === 'confirm' ? learn.confirm(BRAIN, a, +b.index || 0, { replaceConflicting: b.replaceConflicting === true }) : learn.dismiss(BRAIN, a, +b.index || 0);
+      if (r.error) return json(res, 409, r); brainGit.snapshot(`lessons: ${a.name} ${lm[2]}`); return json(res, 200, { ok: true, ...r, lessons: learn.read(BRAIN, a.id) }); }
     if (url.pathname === '/api/lessons') return json(res, 200, { dir: learn.dir(BRAIN), agents: AGENTS.map(a => ({ id: a.id, name: a.name, ...learn.read(BRAIN, a.id) })).filter(x => x.rules.length || x.oneOffs.length) });
     if (url.pathname === '/api/mcp') { if (url.searchParams.get('refresh') === '1') await mcp.discover(); else if (!mcp.list().length) await discovering; /* a cached list answers at once; discovery can take over a minute */ return json(res, 200, { ...mcp.summary(), tools: backend === 'claude-cli' }); }
     if (url.pathname === '/api/brain') return json(res, 200, graph);
@@ -993,7 +1021,7 @@ const server = http.createServer(async (req, res) => {
       console.log(`+ ${task.id} → ${task.agent}: ${task.title}${task.needsOk ? ' (drafts first, waits for your OK)' : ''}${task.state === 'blocked' ? ' (' + task.blockedReason + ')' : ''}`);
       return json(res, 200, task);
     }
-    if (url.pathname === '/api/pending' && req.method === 'GET') { const p = coord.pending(load(), { paused: pausedNow(), agentName }); p.items.push(...pipelineDecisions(), ...researchDecisions()); p.count = p.items.length; return json(res, 200, p); }
+    if (url.pathname === '/api/pending' && req.method === 'GET') { const p = coord.pending(load(), { paused: pausedNow(), agentName }); p.items.push(...pipelineDecisions(), ...researchDecisions(), ...lessonDecisions()); p.count = p.items.length; return json(res, 200, p); }
     if (url.pathname === '/api/research' && req.method === 'GET') { const st = research.loadState(DATA); return json(res, 200, { ...research.stats(st, research.loadConfig(BRAIN)), findings: st.findings.slice(-50), published: st.published }); }
     if (url.pathname === '/api/research/run' && req.method === 'POST') { const r = researchRun(); return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : r); }
     if (url.pathname === '/api/research/rollback' && req.method === 'POST') { const b = await body(req); const st = research.loadState(DATA); const r = research.rollback(st, { brainPath: BRAIN, skill: b.skill, why: String(b.why || '') }); if (r.error) return json(res, r.status, { error: r.error }); research.saveState(DATA, st); refreshSkills(); brainGit.snapshot('research: rolled back ' + b.skill); console.log('  ↺ research rule rolled back from ' + b.skill); return json(res, 200, r); }
@@ -1037,7 +1065,7 @@ const server = http.createServer(async (req, res) => {
     const m = url.pathname.match(/^\/api\/tasks\/([^/]+)(?:\/(run|revise|approve|reject))?$/);
     const learnFrom = (t, note) => { // a correction becomes a lesson only when the rework it asked for actually happened
       const a = AGENTS.find(x => x.id === t.agent);
-      learn.classify(ask, a, t, note).then(v => { const r = learn.record(BRAIN, a, t, note, v); console.log(`  ↳ ${a.name} ${r.standing ? 'learned a rule' : 'noted a one-off'}: ${r.line.slice(0, 100)}`); })
+      learn.classify(ask, a, t, note).then(v => { const r = learn.record(BRAIN, a, t, note, v); console.log(`  ↳ ${a.name} ${r.promoted ? 'made it a standing rule (the owner said it twice)' : r.proposed ? 'proposed a rule for the owner to confirm' + (r.conflict ? ' — it conflicts with another rule' : '') : r.duplicate ? 'already had that rule' : 'noted a one-off'}: ${r.line.slice(0, 100)}`); })
         .catch(e => console.warn('learn:', e.message));
     };
     if (m && req.method === 'POST' && (m[2] === 'approve' || m[2] === 'reject')) { // D1: the owner's tick (or note) on a draft
@@ -1091,12 +1119,6 @@ server.on('error', e => {
 });
 
 /* ---------- running continuously (Phase 8, ops.mjs) ---------- */
-// One office per data folder: a second server on the same tasks.json would run the same work twice.
-{
-  const lock = await ops.acquireLock(DATA, { port: cfg.port, host: HOST });
-  if (!lock.ok) { console.error(`✗ another office (pid ${lock.holder.pid}, port ${lock.holder.port}) is already running on ${DATA} — not starting a second one.`); process.exit(1); }
-  if (lock.tookOver) console.log(`  lock: the previous office (pid ${lock.tookOver.pid}) did not shut down cleanly — taking over`);
-}
 // The heartbeat. Timers do not fire while the machine sleeps, so a long gap between beats is a sleep
 // (or the office being off), and it is surfaced rather than silently leaving routines late.
 const heartbeat = { last: null, sleeps: [] };
@@ -1127,7 +1149,7 @@ function opsSummary() {
   let index = null; try { index = vaultIndex(); } catch {}
   return {
     at: now, instance: { pid: process.pid, startedAt: STARTED, version, port: cfg.port, data: DATA }, paused: pausedNow(), heartbeat, ready: readiness(),
-    problems: ops.problems({ tasks, sleeps: heartbeat.sleeps, usage: usageCache.value, ceiling: USAGE_CEILING, claudeFound: backend !== 'claude-cli' || !!claudeBin(cfg) }),
+    problems: [...(index ? ops.priceConflicts(index) : []), ...ops.problems({ tasks, sleeps: heartbeat.sleeps, usage: usageCache.value, ceiling: USAGE_CEILING, claudeFound: backend !== 'claude-cli' || !!claudeBin(cfg) })],
     tasks: { next: count(t => t.state === 'next'), doing: count(t => t.state === 'doing'), review: count(t => t.state === 'review'), waiting: count(t => t.state === 'waiting'), blocked: count(t => t.state === 'blocked'),
       unknown: count(t => t.needsCheck), failed24h: count(t => t.state === 'done' && t.error && !t.needsCheck && (t.doneAt || 0) > since), done24h: count(t => t.state === 'done' && !t.error && !t.noop && (t.doneAt || 0) > since), noop24h: count(t => t.noop && (t.doneAt || 0) > since) },
     routines: rl.map(r => { const lt = tasks.filter(t => t.routine === r.id).at(-1); return { id: r.id, title: r.title, agent: agentName(r.agent), desc: r.desc, paused: r.paused, needsOk: r.needsOk, nextAt: r.nextAt, lastAt: r.lastAt,
@@ -1151,7 +1173,6 @@ function shutdown(signal, code = 0) {
   setTimeout(() => process.exit(code), 300);
 }
 for (const sig of ['SIGINT', 'SIGTERM', 'SIGBREAK', 'SIGHUP']) { try { process.on(sig, () => shutdown(sig)); } catch {} }
-process.on('exit', () => ops.releaseLock(DATA));
 
 server.listen(cfg.port, HOST, () => {
   console.log(`Agents Office ${version} → http://localhost:${cfg.port}${LOOPBACK ? '   (this machine only)' : '   ⚠ listening on ' + HOST + ' — anyone who can reach it can run and approve tasks'}`);

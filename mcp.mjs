@@ -127,8 +127,8 @@ export function fromInit(init) {
 }
 export function list() { return servers; }
 export function usable() { return servers.filter(s => s.status === 'connected' && allowed(s)); }
-export function allowedTools() {
-  const t = usable().map(s => `mcp__${s.id}`);
+export function allowedTools(dept = null) { // dept: only the servers wired to that department — the wiring the office draws is the wiring it enforces
+  const t = usable().filter(s => !dept || (s.depts || []).includes(dept)).map(s => `mcp__${s.id}`);
   if (cfgWeb) t.push('WebSearch', 'WebFetch');
   return t;
 }

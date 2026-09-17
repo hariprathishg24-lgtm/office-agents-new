@@ -15,6 +15,7 @@
 // Without --fake this uses your real Claude login: 3 cases a seat, plus a QA review for drafts.
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { loadConfig, ROOT } from './config.mjs';
@@ -31,6 +32,7 @@ export function parseFixture(text) {
 }
 
 const money = s => [...String(s).matchAll(/(?:\$|₹|Rs\.?\s?|USD\s?|INR\s?)\s?(\d[\d,]*(?:\.\d+)?)(\s?[kK])?/g)].map(x => Math.round(parseFloat(x[1].replace(/,/g, '')) * (x[2] ? 1000 : 1)));
+export const providerUnavailable = task => !!(task?.error && /session limit|rate.?limit|usage limit|log ?in|authentication|invalid api key/i.test(String(task.result || task.lastError?.message || '')));
 /** Deterministic checks on one answer. */
 export function check(fixture, task, ladderText) {
   const out = String(task.draft || task.result || '');
@@ -48,13 +50,17 @@ export function check(fixture, task, ladderText) {
 }
 
 async function startOffice({ brain, data, fake }) {
-  const port = 6100 + Math.floor(Math.random() * 500);
+  // Ask Windows for an available port. Guessed ranges can overlap its excluded port ranges.
+  const probe = http.createServer();
+  await new Promise((resolve, reject) => { probe.once('error', reject); probe.listen(0, '127.0.0.1', resolve); });
+  const port = probe.address().port;
+  await new Promise(resolve => probe.close(resolve));
   const env = { ...process.env, PORT: String(port), AO_DATA: data, AO_BRAIN: brain, AO_CLOCK: 'off', AO_USAGE: 'off' };
   if (fake) env.AO_CLAUDE = path.join(ROOT, 'test', 'fake-claude.mjs');
   const p = spawn(process.execPath, ['serve.mjs'], { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let log = ''; p.stdout.on('data', d => { log += d; }); p.stderr.on('data', d => { log += d; });
   const base = `http://127.0.0.1:${port}`;
-  for (let i = 0; i < 200; i++) { try { if ((await fetch(base + '/api/health')).ok) return { p, base, log: () => log }; } catch {} await new Promise(r => setTimeout(r, 250)); }
+  for (let i = 0; i < 200; i++) { try { const r = await fetch(base + '/api/health'); if (r.ok) { const health = await r.json(); if (health.instance?.pid === p.pid) return { p, base, log: () => log, closed: new Promise(resolve => p.on('close', resolve)) }; } } catch {} await new Promise(r => setTimeout(r, 250)); }
   p.kill(); throw new Error('the test office did not start:\n' + log.slice(-800));
 }
 
@@ -77,11 +83,12 @@ export async function runSeat(id, { fake = false, brainPath, quiet = false } = {
       const t = await api('POST', '/api/tasks', { dept: agent.department, agent: id, text: f.task, needsOk: f.meta.needsOk === true });
       if (t.error) throw new Error(t.error);
       const done = await api('POST', `/api/tasks/${t.id}/run`); // never approved: a draft stays a draft
+      if (providerUnavailable(done)) throw Object.assign(new Error(String(done.result || done.lastError?.message).split('\n')[0]), { externalUnavailable: true });
       const verdict = check(f, done, ladder);
       results.push({ case: c, task: f.task, state: done.state, error: !!done.error, review: done.review || null, output: done.draft || done.result, ...verdict });
       if (!quiet) console.log(`${verdict.passed ? '✓' : '✗'} ${id} ${c}: ${verdict.checks.filter(x => !x.ok).map(x => x.name + (x.detail ? ' (' + x.detail + ')' : '')).join('; ') || 'all checks passed'}`);
     }
-  } finally { office.p.kill(); try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {} }
+  } finally { office.p.kill(); await office.closed; try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {} }
   const record = { agent: id, at: new Date().toISOString(), live: !fake, passed: results.every(r => r.passed), results };
   if (!fake) fs.writeFileSync(path.join(dir, `results-${record.at.replace(/[:.]/g, '-')}.json`), JSON.stringify(record, null, 2));
   return record;
@@ -92,7 +99,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.join(ROOT, 'fixtur
   if (!which) { console.log('usage: node fixtures.mjs <agent id | first-client> [--fake]'); process.exit(2); }
   const ids = which === 'first-client' ? Object.keys(FIRST_CLIENT) : [which];
   let all = true;
-  for (const id of ids) { try { const r = await runSeat(id, { fake }); all &&= r.passed; } catch (e) { all = false; console.log(`✗ ${id}: ${e.message}`); } }
+  for (const id of ids) { try { const r = await runSeat(id, { fake }); all &&= r.passed; } catch (e) { all = false; console.log(`✗ ${id}: ${e.message}`); if (e.externalUnavailable) { console.log('fixture run stopped: Claude is unavailable; no further plan calls were attempted'); break; } } }
   console.log(all ? '\nall fixture checks passed — the owner still reviews the answers before a seat counts as tested' : '\nsome fixture checks failed — see above');
   process.exit(all ? 0 : 1);
 }

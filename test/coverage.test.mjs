@@ -28,7 +28,7 @@ test('all 119 seats get a level, and nothing is contracted or tested by default'
 });
 
 test('fixture checks catch an off-ladder price, invented proof, a claimed send and a wrong end state', async () => {
-  const { check, parseFixture } = await import('../fixtures.mjs');
+  const { check, parseFixture, providerUnavailable } = await import('../fixtures.mjs');
   const f = parseFixture('---\ncase: "normal"\nagent: "piper"\nneedsOk: true\nexpect: "waiting"\nmustMatch: ["\\\\$6,500"]\nmustNotMatch: ["discount"]\n---\n# x\n\n## Task\nWrite it.\n');
   const ladder = '| Growth retainer | $3,500/mo | **$6,500/mo** | $12,000/mo |\n| ₹1,50,000/mo |';
   assert.equal(check(f, { state: 'waiting', draft: 'Growth: $6,500/mo, or Essential at $3,500/mo. Next step: call on Monday.' }, ladder).passed, true);
@@ -37,6 +37,10 @@ test('fixture checks catch an off-ladder price, invented proof, a claimed send a
   assert.ok(failed.includes('ends waiting') && failed.includes('says: /\\$6,500/') && failed.includes('does not say: /discount/'));
   assert.ok(failed.includes('every price is on the offer ladder') && failed.includes('claims no past work, clients or results') && failed.includes('a draft claims nothing was sent'));
   assert.equal(check(f, { state: 'waiting', draft: 'Growth ₹1,50,000/mo and $6,500/mo' }, ladder).checks.find(c => c.name === 'every price is on the offer ladder').ok, true, 'Indian number format is understood');
+  assert.equal(providerUnavailable({ error: true, result: "You've hit your session limit" }), true);
+  assert.equal(providerUnavailable({ error: true, lastError: { message: '429 rate_limit_error' } }), true);
+  assert.equal(providerUnavailable({ error: true, result: 'the role produced an invalid draft' }), false);
+  assert.equal(providerUnavailable({ error: false, result: 'session limit mentioned in a report' }), false);
 });
 
 test('a contract missing a section, or with an empty one, is not complete', () => {

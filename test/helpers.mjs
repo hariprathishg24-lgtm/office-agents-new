@@ -30,7 +30,11 @@ export function scratch(label) {
 }
 
 export async function startOffice({ brain, data, env = {} }) {
-  const port = 5200 + Math.floor(Math.random() * 700);
+  // Let the OS choose an available port, avoiding Windows' excluded/reserved port ranges.
+  const probe = http.createServer();
+  await new Promise((resolve, reject) => { probe.once('error', reject); probe.listen(0, '127.0.0.1', resolve); });
+  const port = probe.address().port;
+  await new Promise(resolve => probe.close(resolve));
   const logFile = path.join(data, '..', `fake-claude-${port}.log`);
   const childEnv = { ...process.env, PORT: String(port), AO_DATA: data, AO_BRAIN: brain, AO_CLAUDE: FAKE, AO_CLOCK: 'off', AO_USAGE: 'off', AO_TIMEOUT_MS: '3000', FAKE_LOG: logFile, ...env };
   delete childEnv.ANTHROPIC_API_KEY; delete childEnv.AO_HOST; // always the CLI path, always loopback
@@ -41,7 +45,7 @@ export async function startOffice({ brain, data, env = {} }) {
   let health = null;
   for (let i = 0; i < 120 && !health; i++) {
     if (p.exitCode !== null) break;
-    try { const r = await fetch(base + '/api/health'); if (r.ok) health = await r.json(); } catch {}
+    try { const r = await fetch(base + '/api/health'); if (r.ok) { const candidate = await r.json(); if (candidate.instance?.pid === p.pid) health = candidate; } } catch {}
     if (!health) await sleep(150);
   }
   if (!health) { p.kill(); throw new Error('office did not start:\n' + out); }

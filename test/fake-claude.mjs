@@ -15,7 +15,7 @@ const log = entry => { if (process.env.FAKE_LOG) fs.appendFileSync(process.env.F
 const emit = obj => process.stdout.write(JSON.stringify(obj) + '\n');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-if (args[0] === 'mcp') { console.log('No MCP servers configured.'); process.exit(0); }
+if (args[0] === 'mcp') { console.log('claude.ai Gmail: https://gmail.example/mcp - ✔ Connected'); console.log('claude.ai Canva: https://canva.example/mcp - ✔ Connected'); process.exit(0); } // Gmail is wired to sales, Canva is not
 
 const sysAt = args.indexOf('--system-prompt-file');
 const system = sysAt >= 0 ? fs.readFileSync(args[sysAt + 1], 'utf8') : '';
@@ -28,7 +28,7 @@ process.stdin.on('end', async () => {
   const marker = (user.match(/\[fake:([a-z]+)(?:=(\d+))?\]/) || []);
   const request = (user.match(/Owner's request: "?([^\n]*)/) || [])[1] || '';
   const approvedPart = mode === 'approve' ? user.slice(user.indexOf('Approved draft:')) : '';
-  log({ mode, marker: marker[1] || '', request, systemChars: system.length, probe: process.env.FAKE_PROBE ? system.includes(process.env.FAKE_PROBE) : undefined, controlLinesInSend: mode === 'approve' ? /HANDOFF|NEEDS OWNER/.test(approvedPart) : undefined });
+  log({ mode, marker: marker[1] || '', request, allowed: args.includes('--allowedTools') ? args[args.indexOf('--allowedTools') + 1] : '', systemChars: system.length, probe: process.env.FAKE_PROBE ? system.includes(process.env.FAKE_PROBE) : undefined, controlLinesInSend: mode === 'approve' ? /HANDOFF|NEEDS OWNER/.test(approvedPart) : undefined });
   if (mode === 'review') {
     emit({ type: 'result', subtype: 'success', is_error: false, result: /\[fake:reviewfail\]/.test(user) ? 'VERDICT: FAIL\n- "we doubled revenue for 40 clients" — invented proof, we have no clients' : 'VERDICT: PASS' });
     return process.exit(0);

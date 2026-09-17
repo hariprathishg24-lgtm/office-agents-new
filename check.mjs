@@ -84,17 +84,24 @@ await step('skills: a broken skill is refused, not applied', async () => {
   if (!sk.skills.find(x => x.name === 'oneliner' && x.departments.includes('fin'))) throw new Error('one-file skill not loaded');
   return `${sk.problems.length} problems reported · brain proposal wins`;
 });
-await step('lessons: a correction is recorded and standing rules come back', async () => {
+await step('lessons: a correction is proposed, earns a rule by repetition or the owner, and never by contradiction', async () => {
   const learn = await import('./learn.mjs'); const os = await import('node:os');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ao-learn-')); const a = { id: 'piper', name: 'PROPOSALS', role: 'x', does: 'y' };
   learn.record(tmp, a, { title: 'Harbourside proposal' }, 'add the booking integration for this one', { standing: false, rule: '' });
   learn.record(tmp, a, { title: 'Harbourside proposal' }, 'too long — proposals are always one page', { standing: true, rule: 'Keep every proposal to one page.' });
   learn.record(tmp, a, { title: 'Marina quote' }, 'never quote a discount', { standing: true, rule: 'Never offer a discount.' });
+  const r0 = learn.read(tmp, 'piper');
+  if (r0.rules.length !== 0 || r0.proposed.length !== 2) throw new Error(`a first correction must be proposed, not a rule: rules ${r0.rules.length} proposed ${r0.proposed.length}`);
+  const rep = learn.record(tmp, a, { title: 'Bay quote' }, 'one page, again', { standing: true, rule: 'Keep each proposal to one page.' }); // said twice
+  const opp = learn.record(tmp, a, { title: 'Friend quote' }, 'give friends a discount', { standing: true, rule: 'Offer a discount to friends.' }); // the opposite sense
+  if (!rep.promoted || opp.promoted || !opp.conflict) throw new Error('repeat/conflict wrong: ' + JSON.stringify({ rep: rep.promoted, opp: opp.promoted, conflict: opp.conflict }));
+  const c = learn.confirm(tmp, a, learn.read(tmp, 'piper').proposed.findIndex(x => /Never offer a discount/.test(x)));
+  if (!c.confirmed) throw new Error('confirm failed: ' + JSON.stringify(c));
   const r = learn.read(tmp, 'piper'); const txt = learn.promptText(tmp, a); fs.rmSync(tmp, { recursive: true, force: true });
-  if (r.rules.length !== 2 || r.oneOffs.length !== 1) throw new Error(`rules ${r.rules.length} one-offs ${r.oneOffs.length}`);
-  if (!/^LESSONS/.test(txt) || !/one page/.test(txt) || /booking integration/.test(txt) || /←/.test(txt)) throw new Error('prompt text wrong: ' + txt);
+  if (r.rules.length !== 2 || r.oneOffs.length !== 1 || r.proposed.length !== 1) throw new Error(`rules ${r.rules.length} proposed ${r.proposed.length} one-offs ${r.oneOffs.length}`);
+  if (!/^LESSONS/.test(txt) || !/one page/.test(txt) || /booking integration/.test(txt) || /←/.test(txt) || /to friends/.test(txt)) throw new Error('prompt text wrong: ' + txt);
   if (learn.promptText(tmp, { id: 'nobody' })) throw new Error('no file should mean no block');
-  return `${r.rules.length} standing rules · ${r.oneOffs.length} one-off · agent with no file gets nothing`;
+  return `a first correction is proposed · said twice → rule · the opposite is held as a conflict · owner confirm → rule · ${r.rules.length} standing rules · ${r.oneOffs.length} one-off`;
 });
 await step('interview: the lead asks five questions, then writes briefs + a skill into the brain', async () => {
   const onboard = await import('./onboard.mjs'); const { loadRoster } = await import('./roster.mjs'); const { loadSkills } = await import('./skills.mjs'); const os = await import('node:os');
@@ -333,11 +340,15 @@ else {
 /* ---------- 3. server smoke ---------- */
 {
   const port = 4600 + Math.floor(Math.random() * 300);
-  // Its own data folder and no clock: the smoke test must never fire the owner's routines or write
-  // over data/tasks.json. (CHECK_LIVE still runs real Claude calls, against this scratch state.)
+  // Copy the brain as well: startup can create configuration and history even with the clock off.
+  // Offline checks use the fake CLI and no usage calls, regardless of inherited credentials.
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ao-check-'));
-  const env = { ...process.env, PORT: String(port), AO_DATA: scratch, AO_CLOCK: LIVE ? 'on' : 'off' };
+  const brain = path.join(scratch, 'brain');
+  fs.cpSync(cfg.brainPath, brain, { recursive: true, filter: source => path.basename(source) !== '.git' });
+  const env = { ...process.env, PORT: String(port), AO_HOST: '127.0.0.1', AO_DATA: path.join(scratch, 'data'), AO_BRAIN: brain, AO_CLOCK: LIVE ? 'on' : 'off' };
+  if (!LIVE) { env.AO_USAGE = 'off'; env.AO_CLAUDE = path.join(ROOT, 'test', 'fake-claude.mjs'); delete env.ANTHROPIC_API_KEY; delete env.FAKE_LOG; }
   const srv = spawn('node', ['serve.mjs'], { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const stopped = new Promise(resolve => srv.on('close', resolve));
   let log = ''; srv.stdout.on('data', d => { log += d; }); srv.stderr.on('data', d => { log += d; });
   const base = `http://127.0.0.1:${port}`;
   const up = await (async () => { for (let i = 0; i < 40; i++) { try { const r = await fetch(base + '/api/health'); if (r.ok) return await r.json(); } catch {} await new Promise(r => setTimeout(r, 250)); } return null; })();
@@ -452,7 +463,7 @@ else {
       });
     } else ok('live: skipped', 'set CHECK_LIVE=1 to route one task and one chat through Claude');
   }
-  srv.kill();
+  srv.kill(); await stopped;
   try { fs.rmSync(scratch, { recursive: true, force: true }); } catch {}
 }
 

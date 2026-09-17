@@ -32,10 +32,15 @@ test('fixture checks catch an off-ladder price, invented proof, a claimed send a
   const f = parseFixture('---\ncase: "normal"\nagent: "piper"\nneedsOk: true\nexpect: "waiting"\nmustMatch: ["\\\\$6,500"]\nmustNotMatch: ["discount"]\n---\n# x\n\n## Task\nWrite it.\n');
   const ladder = '| Growth retainer | $3,500/mo | **$6,500/mo** | $12,000/mo |\n| ₹1,50,000/mo |';
   assert.equal(check(f, { state: 'waiting', draft: 'Growth: $6,500/mo, or Essential at $3,500/mo. Next step: call on Monday.' }, ladder).passed, true);
-  const bad = check(f, { state: 'done', draft: 'Growth at $4,000/mo with a discount. We have helped 40 consultancies. I have sent it.' }, ladder);
+  const bad = check(f, { state: 'waiting', draft: 'Growth at $4,000/mo with a discount. We have helped 40 consultancies. I have sent it.' }, ladder);
   const failed = bad.checks.filter(c => !c.ok).map(c => c.name);
-  assert.ok(failed.includes('ends waiting') && failed.includes('says: /\\$6,500/') && failed.includes('does not say: /discount/'));
+  assert.ok(failed.includes('says: /\\$6,500/') && failed.includes('does not say: /discount/'));
   assert.ok(failed.includes('every price is on the offer ladder') && failed.includes('claims no past work, clients or results') && failed.includes('a draft claims nothing was sent'));
+  assert.ok(check(f, { state: 'done', draft: 'Growth: $6,500/mo' }, ladder).checks.some(c => c.name === 'ends waiting' && !c.ok), 'the wrong end state fails');
+  const either = parseFixture('---\nexpect: "waiting|done"\nmustMatch: []\nadvisory: ["claims"]\n---\n## Task\nx\n');
+  const refusal = check(either, { state: 'done', result: 'NOTHING TO SEND. "We have helped 40 consultancies" is invented: we have no clients.' }, ladder);
+  assert.equal(refusal.passed, true, 'a refusal that quotes the invented claim passes; the phrase check is advisory');
+  assert.ok(refusal.checks.find(c => c.name === 'claims no past work, clients or results').advisory);
   assert.equal(check(f, { state: 'waiting', draft: 'Growth ₹1,50,000/mo and $6,500/mo' }, ladder).checks.find(c => c.name === 'every price is on the offer ladder').ok, true, 'Indian number format is understood');
   assert.equal(providerUnavailable({ error: true, result: "You've hit your session limit" }), true);
   assert.equal(providerUnavailable({ error: true, lastError: { message: '429 rate_limit_error' } }), true);

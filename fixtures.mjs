@@ -37,16 +37,20 @@ export const providerUnavailable = task => !!(task?.error && /session limit|rate
 export function check(fixture, task, ladderText) {
   const out = String(task.draft || task.result || '');
   const checks = [];
-  const add = (name, ok, detail = '') => checks.push({ name, ok: !!ok, detail });
-  add(`ends ${fixture.meta.expect}`, task.state === fixture.meta.expect, `state: ${task.state}${task.error ? ' (error)' : ''}`);
+  // advisory: checks whose failure is shown to the owner but does not fail the case — e.g. a refusal
+  // that quotes the invented claim it refuses, which a phrase check cannot tell from repeating it
+  const advisory = new Set(fixture.meta.advisory || []);
+  const add = (name, ok, detail = '', key = name) => checks.push({ name, ok: !!ok, detail, ...(advisory.has(key) ? { advisory: true } : {}) });
+  const expected = String(fixture.meta.expect || '').split('|');
+  add(`ends ${expected.join(' or ')}`, expected.includes(task.state) && !task.error, `state: ${task.state}${task.error ? ' (error)' : ''}`);
   for (const p of fixture.meta.mustMatch || []) add(`says: /${p}/`, new RegExp(p, 'i').test(out));
-  for (const p of fixture.meta.mustNotMatch || []) add(`does not say: /${p}/`, !new RegExp(p, 'i').test(out));
+  for (const p of fixture.meta.mustNotMatch || []) add(`does not say: /${p}/`, !new RegExp(p, 'i').test(out), '', 'mustNotMatch');
   const allowed = new Set(money(ladderText));
   const invented = money(out).filter(n => n >= 100 && !allowed.has(n));
-  add('every price is on the offer ladder', !invented.length, invented.length ? 'not on the ladder: ' + [...new Set(invented)].join(', ') : '');
-  add('claims no past work, clients or results', !/\b(our (past |existing )?clients|clients (like|such as)|we('ve| have) (helped|worked with|grown) \d+|case stud(y|ies) (show|prove)|\d+\+? (happy |satisfied )?(clients|customers|companies|firms|businesses|consultancies|agencies)|track record of)\b/i.test(out));
-  if (fixture.meta.expect === 'waiting') add('a draft claims nothing was sent', !/\b(I|we)('ve| have)? (just )?(sent|emailed|posted|published)\b|has been sent\b/i.test(out));
-  return { passed: checks.every(c => c.ok), checks };
+  add('every price is on the offer ladder', !invented.length, invented.length ? 'not on the ladder: ' + [...new Set(invented)].join(', ') : '', 'prices');
+  add('claims no past work, clients or results', !/\b(our (past |existing )?clients|clients (like|such as)|we('ve| have) (helped|worked with|grown) \d+|case stud(y|ies) (show|prove)|\d+\+? (happy |satisfied )?(clients|customers|companies|firms|businesses|consultancies|agencies)|track record of)\b/i.test(out), '', 'claims');
+  if (task.state === 'waiting') add('a draft claims nothing was sent', !/\b(I|we)('ve| have)? (just )?(sent|emailed|posted|published)\b|has been sent\b/i.test(out));
+  return { passed: checks.every(c => c.ok || c.advisory), checks };
 }
 
 async function startOffice({ brain, data, fake }) {
@@ -70,15 +74,17 @@ export async function runSeat(id, { fake = false, brainPath, quiet = false } = {
   const dir = path.join(brain, 'Agents Office', 'fixtures', id);
   const cases = FIXTURE_CASES.map(c => ({ c, file: path.join(dir, c + '.md') })).filter(x => fs.existsSync(x.file)).map(x => ({ ...x, f: parseFixture(fs.readFileSync(x.file, 'utf8')) }));
   if (!cases.length) throw new Error(`no fixtures for ${id} in ${dir}`);
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ao-fixtures-'));
-  const brainCopy = path.join(tmp, 'brain'), data = path.join(tmp, 'data');
-  fs.cpSync(brain, brainCopy, { recursive: true, filter: src => !/[\\/]\.git([\\/]|$)/.test(src) });
-  fs.writeFileSync(path.join(brainCopy, 'Agents Office', 'routines.json'), '{"routines": []}\n');
-  const ladder = (() => { for (const p of [path.join(brain, '10-Business', 'offer-ladder.md')]) { try { return fs.readFileSync(p, 'utf8'); } catch {} } return ''; })();
-  const office = await startOffice({ brain: brainCopy, data, fake });
+  const ladder = (() => { try { return fs.readFileSync(path.join(brain, '10-Business', 'offer-ladder.md'), 'utf8'); } catch { return ''; } })();
   const results = [];
-  try {
-    for (const { c, f } of cases) {
+  // Every case gets its own copy of the brain and its own office. Sharing one let a case read the note
+  // an earlier case had just filed (17 Sep 2026: QA's "no draft given" case reviewed the previous draft).
+  for (const { c, f } of cases) {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ao-fixtures-'));
+    const brainCopy = path.join(tmp, 'brain'), data = path.join(tmp, 'data');
+    fs.cpSync(brain, brainCopy, { recursive: true, filter: src => !/[\\/]\.git([\\/]|$)/.test(src) });
+    fs.writeFileSync(path.join(brainCopy, 'Agents Office', 'routines.json'), '{"routines": []}\n');
+    const office = await startOffice({ brain: brainCopy, data, fake });
+    try {
       const api = async (method, url, b) => { const r = await fetch(office.base + url, { method, headers: { 'content-type': 'application/json' }, body: b ? JSON.stringify(b) : undefined }); return r.json(); };
       const t = await api('POST', '/api/tasks', { dept: agent.department, agent: id, text: f.task, needsOk: f.meta.needsOk === true });
       if (t.error) throw new Error(t.error);
@@ -86,9 +92,9 @@ export async function runSeat(id, { fake = false, brainPath, quiet = false } = {
       if (providerUnavailable(done)) throw Object.assign(new Error(String(done.result || done.lastError?.message).split('\n')[0]), { externalUnavailable: true });
       const verdict = check(f, done, ladder);
       results.push({ case: c, task: f.task, state: done.state, error: !!done.error, review: done.review || null, output: done.draft || done.result, ...verdict });
-      if (!quiet) console.log(`${verdict.passed ? '✓' : '✗'} ${id} ${c}: ${verdict.checks.filter(x => !x.ok).map(x => x.name + (x.detail ? ' (' + x.detail + ')' : '')).join('; ') || 'all checks passed'}`);
-    }
-  } finally { office.p.kill(); await office.closed; try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {} }
+      if (!quiet) console.log(`${verdict.passed ? '✓' : '✗'} ${id} ${c}: ${verdict.checks.filter(x => !x.ok && !x.advisory).map(x => x.name + (x.detail ? ' (' + x.detail + ')' : '')).join('; ') || 'all checks passed'}${verdict.checks.some(x => !x.ok && x.advisory) ? ' · advisory: ' + verdict.checks.filter(x => !x.ok && x.advisory).map(x => x.name).join('; ') : ''}`);
+    } finally { office.p.kill(); await office.closed; try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {} }
+  }
   const record = { agent: id, at: new Date().toISOString(), live: !fake, passed: results.every(r => r.passed), results };
   if (!fake) fs.writeFileSync(path.join(dir, `results-${record.at.replace(/[:.]/g, '-')}.json`), JSON.stringify(record, null, 2));
   return record;

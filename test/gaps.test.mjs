@@ -176,6 +176,25 @@ describe('deadlines, budgets and limits in a running office', () => {
   });
 });
 
+describe('a seat reads its own contract', () => {
+  test('the contract reaches the agent that has one, and a seat without one still runs', async () => {
+    const s = scratch('contract');
+    const dir = path.join(s.brain, 'Agents Office', 'contracts'); fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'lexi.md'), '# SALES LEAD\n## Output\nFirst line VERDICT-MARKER-FOR-THE-TEST, then the list.\n');
+    const office = await startOffice({ brain: s.brain, data: s.data, env: { FAKE_PROBE: 'VERDICT-MARKER-FOR-THE-TEST' } });
+    try {
+      const t = (await named(office, 'list the open deals')).body;
+      await office.api('POST', `/api/tasks/${t.id}/run`);
+      const mine = office.calls().find(c => c.request === 'list the open deals' && c.mode !== 'router');
+      assert.equal(mine.probe, true, 'the seat was given its contract');
+      const other = (await office.api('POST', '/api/tasks', { dept: 'sales', agent: 'pros', text: 'list the target firms', needsOk: false })).body;
+      const r = await office.api('POST', `/api/tasks/${other.id}/run`);
+      assert.equal(r.body.error, false, 'a seat with no contract works as before');
+      assert.equal(office.calls().find(c => c.request === 'list the target firms' && c.mode !== 'router').probe, false);
+    } finally { await office.stop(); s.cleanup(); }
+  });
+});
+
 describe('measures and terms', () => {
   test('measure counts finished, failed, nothing-to-send, corrections and cost apart', () => {
     const tasks = [
@@ -215,6 +234,19 @@ describe('watched research pages and rule effects', () => {
   after(async () => { await office.stop(); s.cleanup(); site.close(); });
   const watch = async () => (await office.api('POST', '/api/research/watch')).body;
   const pending = async () => (await office.api('GET', '/api/pending')).body.items;
+
+  test('a research file written before watched pages existed gains them, and keeps what the owner set', async () => {
+    const s2 = scratch('watch-upgrade');
+    const file = path.join(s2.brain, 'Agents Office', 'research.json');
+    const { watch, watchEveryHours, ...old } = research.template(); // the file as it was written before
+    fs.writeFileSync(file, JSON.stringify({ ...old, runsPerWeek: 3, findingsPerRun: 4, staleDays: 42 }));
+    const o = await startOffice({ brain: s2.brain, data: s2.data });
+    try {
+      const after = JSON.parse(fs.readFileSync(file, 'utf8'));
+      assert.ok(Array.isArray(after.watch) && after.watchEveryHours, 'the watch slots were added');
+      assert.equal(after.runsPerWeek, 3); assert.equal(after.staleDays, 42, "the owner's settings are untouched");
+    } finally { await o.stop(); s2.cleanup(); }
+  });
 
   test('the first check only records the page; a script change alone is not a change', async () => {
     const r = await watch();

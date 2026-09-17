@@ -42,6 +42,7 @@ test('fixture checks catch an off-ladder price, invented proof, a claimed send a
   assert.equal(refusal.passed, true, 'a refusal that quotes the invented claim passes; the phrase check is advisory');
   assert.ok(refusal.checks.find(c => c.name === 'claims no past work, clients or results').advisory);
   assert.equal(check(f, { state: 'waiting', draft: 'Growth ₹1,50,000/mo and $6,500/mo' }, ladder).checks.find(c => c.name === 'every price is on the offer ladder').ok, true, 'Indian number format is understood');
+  assert.equal(check(f, { state: 'waiting', draft: 'Where did your last 10 clients come from? $6,500/mo' }, ladder).checks.find(c => c.name === 'claims no past work, clients or results').ok, true, "a question about the reader's own clients is not a claim about ours");
   assert.equal(providerUnavailable({ error: true, result: "You've hit your session limit" }), true);
   assert.equal(providerUnavailable({ error: true, lastError: { message: '429 rate_limit_error' } }), true);
   assert.equal(providerUnavailable({ error: true, result: 'the role produced an invalid draft' }), false);

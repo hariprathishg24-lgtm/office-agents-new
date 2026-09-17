@@ -35,6 +35,10 @@ const dirs = brainPath => ({ contracts: path.join(brainPath, 'Agents Office', 'c
 const hash = t => crypto.createHash('sha256').update(String(t)).digest('hex').slice(0, 16);
 const norm = s => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '');
 
+export const contractFile = (brainPath, id) => path.join(dirs(brainPath).contracts, id + '.md');
+/** The seat's contract as the seat itself reads it before a task. '' when there is none. */
+export function contractText(brainPath, id) { try { return fs.readFileSync(contractFile(brainPath, id), 'utf8').trim(); } catch { return ''; } }
+
 /** Parse a contract: which required sections are present and non-empty. */
 export function checkContract(text) {
   const found = new Map();

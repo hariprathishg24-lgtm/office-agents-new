@@ -350,7 +350,13 @@ function rosterText(dept) { return AGENTS.filter(a => a.department === dept).map
 function agentBrief(a) {
   const lessons = learn.promptText(BRAIN, a);
   let found = ''; try { found = research.promptText(research.forAgent(research.loadState(DATA), a.id)); } catch {} // reviewed industry findings, only for the roles they name
-  return (a.brief ? `\nSTANDING INSTRUCTIONS FROM THE OWNER\n${a.brief}\n` : '') + (skills.promptText(a) ? `\n${skills.promptText(a)}\n` : '') + (lessons ? `\n${lessons}\n` : '') + (found ? `\n${found}\n` : '');
+  // The capability contract is how this seat works, agreed with the owner. It used to be read only by
+  // the coverage report, so a "contracted" seat still worked from its job title: QA answered
+  // "CONDITIONAL PASS" where its contract allows only PASS or FAIL. The seat reads it now.
+  let contract = ''; try { contract = coverageMod.contractText(BRAIN, a.id); } catch {}
+  return (a.brief ? `\nSTANDING INSTRUCTIONS FROM THE OWNER\n${a.brief}\n` : '')
+    + (contract ? `\nYOUR CAPABILITY CONTRACT — how this seat does its work. Follow Procedure, Output, Boundaries and "Escalate when" exactly; the Output shape is not optional.\n${contract}\n` : '')
+    + (skills.promptText(a) ? `\n${skills.promptText(a)}\n` : '') + (lessons ? `\n${lessons}\n` : '') + (found ? `\n${found}\n` : '');
 }
 const toolKeys = names => [...new Set(names.map(n => /^mcp__/.test(n) ? mcp.keyOf(n) : n === 'WebSearch' || n === 'WebFetch' ? 'web' : null).filter(Boolean))];
 async function route(dept, text) {
@@ -1264,7 +1270,8 @@ server.listen(cfg.port, HOST, () => {
   pipelineSync();
   researchSync();
   if (!fs.existsSync(research.configFile(BRAIN))) { try { fs.writeFileSync(research.configFile(BRAIN), JSON.stringify(research.template(), null, 2) + String.fromCharCode(10)); console.log('  research: wrote ' + research.configFile(BRAIN) + ' with the budget unset'); } catch {} }
-  { const c = research.loadConfig(BRAIN); console.log('  research: ' + (c.active ? 'ACTIVE, ' + c.config.runsPerWeek + ' run(s) a week' : 'off — ' + (c.missing.length ? 'not set: ' + c.missing.join(', ') : '"active" is not true'))); }
+  else { try { const cur = JSON.parse(fs.readFileSync(research.configFile(BRAIN), 'utf8')); const t = research.template(); const added = ['watch', 'watchEveryHours'].filter(k => !(k in cur)); if (added.length) { for (const k of added) cur[k] = t[k]; fs.writeFileSync(research.configFile(BRAIN), JSON.stringify(cur, null, 2) + '\n'); console.log(`  research: added ${added.join(', ')} — nothing the owner set was changed; watched pages are only checked once research is active`); } } catch {} } // a file written before watched pages existed
+  { const c = research.loadConfig(BRAIN); console.log('  research: ' + (c.active ? 'ACTIVE, ' + c.config.runsPerWeek + ' run(s) a week' : 'off — ' + (c.missing.length ? 'not set: ' + c.missing.join(', ') : '"active" is not true')) + ((c.config.watch || []).length ? ` · ${c.config.watch.length} watched page(s)` : '')); }
   { const c = acq.loadConstraints(BRAIN); console.log(`  acquisition workflow: ${c.active ? 'ACTIVE' : 'off — ' + (c.missing.length ? 'not set: ' + c.missing.join(', ') : '"active" is not true')}`); }
   beat(); setInterval(beat, 20000); // liveness: the heartbeat runs with or without the clock
   if (CLOCK_ON) { setInterval(tickRoutines, 20000); tickRoutines(); } // the clock: every 20 s; the first tick catches up anything missed while the office was off (once, marked LATE)

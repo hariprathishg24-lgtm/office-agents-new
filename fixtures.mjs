@@ -48,7 +48,9 @@ export function check(fixture, task, ladderText) {
   const allowed = new Set(money(ladderText));
   const invented = money(out).filter(n => n >= 100 && !allowed.has(n));
   add('every price is on the offer ladder', !invented.length, invented.length ? 'not on the ladder: ' + [...new Set(invented)].join(', ') : '', 'prices');
-  add('claims no past work, clients or results', !/\b(our (past |existing )?clients|clients (like|such as)|we('ve| have) (helped|worked with|grown) \d+|case stud(y|ies) (show|prove)|\d+\+? (happy |satisfied )?(clients|customers|companies|firms|businesses|consultancies|agencies)|track record of)\b/i.test(out), '', 'claims');
+  // Only claims about US count. A post asking the reader "where did your last 10 clients come from?"
+  // is not a claim of past work, so the count needs first-person context near it.
+  add('claims no past work, clients or results', !/\b(our (past |existing )?clients|clients (like|such as)|we('ve| have) (helped|worked with|grown) \d+|case stud(y|ies) (show|prove)|(we|our|us)\b[^.\n]{0,60}\b\d+\+? (happy |satisfied )?(clients|customers|companies|firms|businesses|consultancies|agencies)|track record of)\b/i.test(out), '', 'claims');
   if (task.state === 'waiting') add('a draft claims nothing was sent', !/\b(I|we)('ve| have)? (just )?(sent|emailed|posted|published)\b|has been sent\b/i.test(out));
   return { passed: checks.every(c => c.ok || c.advisory), checks };
 }

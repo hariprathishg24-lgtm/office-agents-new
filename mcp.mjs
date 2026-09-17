@@ -10,6 +10,7 @@
 //   allow  — empty = every connected server; otherwise only these (name, id or key)
 //   deny   — servers the agents may see in the bar but never call
 //   departments — which pods a server is wired to (default: a built-in map, else every pod)
+import fs from 'node:fs';
 import { claudeBin, spawnClaude } from './claude-bin.mjs';
 
 export const DEPT_KEYS = ['emails', 'sales', 'marketing', 'ops', 'fin', 'delivery', 'creative', 'success', 'risk', 'growth', 'exec',
@@ -67,7 +68,7 @@ function deptsFor(name, key) {
 }
 function make(name, target, status) {
   const key = logoKey(name);
-  return { id: toolId(name), name: display(name), key, status, target: target || '', source: /^claude\.ai\s/i.test(name) ? 'claude.ai' : 'local',
+  return { id: toolId(name), rawName: name, name: display(name), key, status, target: target || '', source: /^claude\.ai\s/i.test(name) ? 'claude.ai' : 'local',
     depts: deptsFor(name, key), tools: [] };
 }
 export function parseList(text) {
@@ -80,11 +81,28 @@ export function parseList(text) {
   }
   return out;
 }
-export function discover({ timeout = 45000 } = {}) {
+// `claude mcp list` health-checks every server before it prints a line: with 21 servers it took
+// ~70 s on 17 Sep 2026, past the old 45 s limit, and every restart came up with no connectors —
+// agents silently lost Gmail. So the wait is longer, the last good list is cached on disk, and an
+// empty or timed-out discovery never replaces a list we already have.
+let cacheFile = null;
+export function useCache(file) {
+  cacheFile = file;
+  try { const c = JSON.parse(fs.readFileSync(file, 'utf8')); if (Array.isArray(c.servers) && c.servers.length && !servers.length) { servers = c.servers.map(s => make(s.rawName || s.name, s.target, s.status)); discoveredAt = c.at || 0; return servers.length; } } catch {}
+  return 0;
+}
+export function discover({ timeout = 150000 } = {}) {
   return new Promise(resolve => {
     const env = { ...process.env }; delete env.CLAUDECODE;
     let out = '', done = false;
-    const finish = list => { if (done) return; done = true; if (list) { servers = list; discoveredAt = Date.now(); } resolve(servers); };
+    const finish = list => {
+      if (done) return; done = true;
+      if (list && list.length) {
+        servers = list; discoveredAt = Date.now();
+        if (cacheFile) { try { fs.writeFileSync(cacheFile, JSON.stringify({ at: discoveredAt, servers: list.map(s => ({ rawName: s.rawName, name: s.name, target: s.target, status: s.status })) })); } catch {} }
+      }
+      resolve(servers);
+    };
     let p;
     try { p = spawnClaude(claudeBin(cfgMcp.__cfg || {}), ['mcp', 'list'], { env, stdio: ['ignore', 'pipe', 'pipe'] }); } catch { return finish([]); }
     const timer = setTimeout(() => { try { p.kill('SIGKILL'); } catch {} finish(parseList(out)); }, timeout);

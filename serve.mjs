@@ -48,6 +48,7 @@ import { readJSON, writeJSON, StoreError } from './store.mjs';
 import * as brainGit from './brain-git.mjs';
 import { scrub } from './scrub.mjs';
 import * as coord from './coordinator.mjs';
+import * as acq from './acquisition.mjs';
 
 const cfg = loadConfig();
 const HTML = path.join(ROOT, 'dist', 'command-centre-v2.html'); // built by build.mjs; shipped so npm start works without a build
@@ -356,7 +357,7 @@ async function run(task, feedback, mode, { onToolUse } = {}) {
     `${mcp.promptText(a.tools)}\n\n${NOTES_HEADER}\n\n${businessContext(index)}\n\nNOTES YOU READ FOR THIS TASK\n${contextText(index, read)}`;
   const routineLine = task.routine ? `\nThis is a routine (${task.when}): it runs on the office's own clock and the owner is not at the keyboard. It is now ${new Date().toLocaleString([], { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })}${task.late ? `; this run is late, it was due ${new Date(task.due).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}` : ''}. Do the work for now.` : '';
   const modeLine = mode === 'draft' ? '\nPrepare everything, but send, post, pay or change NOTHING outside this machine: the owner reads this first and approves it. End with one line saying exactly what will go out when approved. If it turns out nothing needs to go out (nothing found, nobody to contact), make the FIRST line exactly "NOTHING TO SEND", then say briefly what you checked — that is a finished report, not something for the owner to approve.'
-    : mode === 'approve' ? `\nThe owner has APPROVED the draft below. Carry out the outbound step now, exactly as drafted, with your tools (send, post, update). If a tool you need is not connected, say so and show what you would have sent. Then report in one short section: what went out, to whom, and anything that did not. Do not hand off or ask anything in this step.\nApproved draft:\n${withoutControlLines(task.approval.draft)}`
+    : mode === 'approve' ? `\nThe owner has APPROVED the draft below. Carry out the outbound step now, exactly as drafted, with your tools (send, post, update). If a tool you need is not connected, say so and show what you would have sent. Then report in one short section: what went out, to whom, and anything that did not. Do not hand off or ask anything in this step. If the tool gave back an id or a link for what went out (a message id, a post URL), end with one line "REF: <it>".\nApproved draft:\n${withoutControlLines(task.approval.draft)}`
     : '\nThis task was judged read-only: read, research and report. Send, post, pay, delete or change NOTHING outside this machine. If doing it properly needs an outbound step, draft that step and say it needs the owner\'s OK.';
   const user = `Task: ${task.title}\nOwner's request: ${task.text}` + (task.plan?.length ? `\nAgreed plan: ${task.plan.join(' → ')}` : '') + routineLine + modeLine +
     (feedback && mode !== 'approve' ? `\n\nThe owner reviewed your previous version and asked for changes: "${feedback}"\nPrevious version:\n${task.result}` : '');
@@ -523,7 +524,7 @@ const reviewerFor = t => {
   const r = AGENTS.find(a => a.id === (cfg.review?.outbound || 'qa'));
   return r && r.id !== t.agent ? r : null;
 };
-const CONTROL_LINE = /^[\s>*\-•]*(HANDOFF\s*(→|->|=>|to)|NEEDS OWNER\s*:)/i;
+const CONTROL_LINE = /^[\s>*\-•]*(HANDOFF\s*(→|->|=>|to)|NEEDS OWNER\s*:|REASON\s*:)/i;
 const withoutControlLines = text => String(text || '').split(/\r?\n/).filter(l => !CONTROL_LINE.test(l)).join('\n').trim();
 async function reviewDraft(task, draft, attemptId) {
   const r = reviewerFor(task); if (!r) return null;
@@ -624,6 +625,7 @@ async function execute(id, attemptId, { feedback } = {}) {
   save(list);
   for (const n of made) console.log(`  ↳ handoff ${n.id} → ${n.agent}: ${n.title}`);
   for (const n of [...made, ...runnable]) enqueue(() => startQueued(n.id)); // a handoff starts as next (its prerequisite just finished); the queue takes it
+  if (t.pipeline) pipelineSync();
   if (t.filed === 'ok' && t.state === 'done') await rebuildGraph();
   const tag = t.needsCheck ? '? outcome unknown' : t.error ? '✗ failed' : t.state === 'waiting' ? `⏸ waiting for your OK${t.review ? ' (review: ' + t.review.verdict + ')' : ''}` : a.outcome === 'error' ? '✗ revision failed, previous result kept' : '✓ done';
   console.log(`${tag.slice(0, 1)} ${t.id} ${tag.slice(2)} (${a.action}/${a.mode}${failure ? ': ' + failure.message.slice(0, 160) : ''}${t.tools?.length ? ', tools: ' + t.tools.join(' ') : ''}${t.note && t.filed === 'ok' && !failure ? ', note: ' + t.note : ''})`);
@@ -631,10 +633,10 @@ async function execute(id, attemptId, { feedback } = {}) {
 }
 
 /* ---------- the owner's controls over tasks (Phase 7) ---------- */
-function newTask({ dept, agent, title, text, needsOk, after = [], goal, by = 'you', plan = [], why = '', model, effort }) {
+function newTask({ dept, agent, title, text, needsOk, after = [], goal, by = 'you', plan = [], why = '', model, effort, pipeline }) {
   const list = load();
   const known = after.filter(id => list.some(t => t.id === id));
-  const task = { id: nid(), dept, agent, title, text, plan, eta: 15, why, needsOk, state: coord.initialState(known, list), addedAt: Date.now(), by, ...(known.length ? { after: known } : {}), ...(goal ? { goal } : {}), model, effort, because: known.length ? `created; waits for ${known.length} task${known.length > 1 ? 's' : ''}` : 'created' };
+  const task = { id: nid(), dept, agent, title, text, plan, eta: 15, why, needsOk, state: coord.initialState(known, list), addedAt: Date.now(), by, ...(known.length ? { after: known } : {}), ...(goal ? { goal } : {}), ...(pipeline ? { pipeline } : {}), model, effort, because: known.length ? `created; waits for ${known.length} task${known.length > 1 ? 's' : ''}` : 'created' };
   list.push(task); coord.unblock(list); save(list);
   if (task.state === 'next' && serverRuns(task)) enqueue(() => startQueued(task.id));
   return list.find(t => t.id === task.id);
@@ -670,6 +672,7 @@ function ownerAction(id, verb, b) {
     return { task: t, follow };
   } else return { status: 400, error: 'unknown action' };
   const runnable = afterChange(list); save(list);
+  if (t.pipeline) pipelineSync();
   for (const n of runnable) enqueue(() => startQueued(n.id));
   return { task: list.find(x => x.id === id) };
 }
@@ -679,6 +682,59 @@ function setPaused(paused, why) {
   console.log(paused ? `⏸ office PAUSED${office.pausedWhy ? ': ' + office.pausedWhy : ''} — nothing new starts` : '▶ office resumed');
   if (!paused) for (const t of load().filter(t => t.state === 'next' && serverRuns(t))) enqueue(() => startQueued(t.id));
   return pausedNow();
+}
+
+/* ---------- the first-client acquisition workflow (Phase 6, acquisition.mjs) ---------- */
+// Keep data/pipeline.json in step with every task that belongs to it, then let the workflow take
+// its next steps. Every step it takes is an ordinary task: claimed, reviewed, approved, recorded.
+function pipelineSync() {
+  let pipe, tasks; try { pipe = acq.loadPipeline(DATA); tasks = load(); } catch (e) { console.warn('  ✗ pipeline:', e.message); return; } // a damaged store is reported by the API, never a crash here
+  const runs = [];
+  for (const t of tasks.filter(t => t.pipeline)) { const r = acq.recordTask(pipe, t); if (r) runs.push(r); }
+  if (!runs.length) return;
+  acq.savePipeline(DATA, pipe);
+  for (const r of runs) if (r.noop || r.problem || r.accepted !== undefined) console.log(`  ◇ pipeline ${r.step}: ${r.noop || r.problem || `${r.accepted} accepted, ${(r.rejected || []).length} rejected`}`);
+  pipelineAdvance();
+}
+function pipelineAdvance() {
+  const constraints = acq.loadConstraints(BRAIN);
+  if (office.paused) return { created: [], noop: 'The office is paused.' };
+  let pipe, open; try { pipe = acq.loadPipeline(DATA); open = load().filter(t => t.pipeline && !coord.TERMINAL.includes(t.state)); } catch (e) { return { created: [], noop: 'The state files are damaged: ' + e.message }; }
+  const { actions, noop } = acq.plan(pipe, constraints, open);
+  const created = [];
+  for (const a of actions) {
+    const spec = acq.taskFor(a, pipe, { exclude: pipe.prospects.map(p => p.key) });
+    const agent = AGENTS.find(x => x.id === spec.agent);
+    if (!agent) { console.warn(`  ✗ pipeline: no agent ${spec.agent} on the roster for ${a.step}`); continue; }
+    const t = newTask({ dept: agent.department, agent: agent.id, title: spec.title, text: spec.text, needsOk: spec.needsOk, by: 'pipeline', goal: 'first-client', why: `acquisition workflow: ${a.step}`,
+      pipeline: { step: a.step, ...(a.key ? { key: a.key } : {}), ...(a.keys ? { keys: a.keys } : {}) } });
+    if (a.step === 'qualify') for (const k of a.keys) { const p = pipe.prospects.find(x => x.key === k); if (p) p.qualifyTask = t.id; }
+    created.push({ id: t.id, step: a.step, agent: agent.id, title: t.title });
+    console.log(`  ◆ pipeline ${a.step} → ${agent.id}: ${t.title}`);
+  }
+  if (actions.some(a => a.step === 'qualify')) acq.savePipeline(DATA, pipe);
+  return { created, noop };
+}
+function pipelineMark(key, event, note) {
+  const pipe = acq.loadPipeline(DATA);
+  const r = acq.mark(pipe, key, event, note);
+  if (r.error) return r;
+  acq.savePipeline(DATA, pipe);
+  console.log(`  ◇ pipeline ${key}: ${event}${note ? ' — ' + note : ''}`);
+  let task = null;
+  if (r.action) { // interested → a proposal draft; signed → a delivery plan
+    const spec = acq.taskFor(r.action, pipe); const agent = AGENTS.find(x => x.id === spec.agent);
+    if (agent && !office.paused) task = newTask({ dept: agent.department, agent: agent.id, title: spec.title, text: spec.text, needsOk: spec.needsOk, by: 'pipeline', goal: 'first-client', why: `acquisition workflow: ${r.action.step}`, pipeline: { step: r.action.step, key } });
+  }
+  return { prospect: r.prospect, task };
+}
+function pipelineDecisions() { // for /api/pending: what the workflow needs from the owner
+  const c = acq.loadConstraints(BRAIN), items = [];
+  if (!c.active) items.push({ kind: 'acquisition-constraints', decision: c.missing.length ? `Set the acquisition limits in ${c.file}: ${c.missing.map(k => `${k} — ${acq.CONSTRAINTS[k]}`).join('; ')}. Then set "active": true. Until then the workflow starts nothing.` : `Set "active": true in ${c.file} to start the acquisition workflow.` });
+  let pipe; try { pipe = acq.loadPipeline(DATA); } catch { return items; }
+  for (const p of pipe.prospects.filter(p => p.stage === 'needs-review')) items.push({ kind: 'prospect-review', key: p.key, title: p.company, decision: `Review prospect ${p.company}: ${p.history?.at(-1)?.why || 'fit unclear'}. Mark it qualified or disqualified.` });
+  for (const p of pipe.prospects.filter(p => p.stage === 'unknown')) items.push({ kind: 'prospect-unknown', key: p.key, title: p.company, decision: `Check whether the message to ${p.company} went out, then mark the task checked.` });
+  return items;
 }
 
 // After a crash, a restart or a sleep, the queue in memory is gone. Nothing that was mid-flight is
@@ -746,10 +802,12 @@ async function routinesHeld() {
     return true;
   } catch { return false; }
 }
+let lastPipelineTick = 0;
 async function tickRoutines() {
   if (office.paused) return; // paused: routines stay due and fire once the owner resumes
   let list; try { list = loadRoutines(); } catch (e) { console.warn('routines:', e.message); return; }
   const dueNow = routines.due(list, RSTATE);
+  if (Date.now() - lastPipelineTick > 30 * 60 * 1000 && acq.loadConstraints(BRAIN).active && !(await routinesHeld())) { lastPipelineTick = Date.now(); pipelineAdvance(); } // the workflow's own heartbeat: every 30 min, only when active
   if (!dueNow.length) return;
   if (await routinesHeld()) return;                       // over budget: leave them due, try again later
   for (const { routine, due, late } of dueNow) fire(routine, { due, late });
@@ -880,7 +938,11 @@ const server = http.createServer(async (req, res) => {
       console.log(`+ ${task.id} → ${task.agent}: ${task.title}${task.needsOk ? ' (drafts first, waits for your OK)' : ''}${task.state === 'blocked' ? ' (' + task.blockedReason + ')' : ''}`);
       return json(res, 200, task);
     }
-    if (url.pathname === '/api/pending' && req.method === 'GET') return json(res, 200, coord.pending(load(), { paused: pausedNow(), agentName })); // everything waiting on the owner, as decisions
+    if (url.pathname === '/api/pending' && req.method === 'GET') { const p = coord.pending(load(), { paused: pausedNow(), agentName }); p.items.push(...pipelineDecisions()); p.count = p.items.length; return json(res, 200, p); }
+    if (url.pathname === '/api/pipeline' && req.method === 'GET') return json(res, 200, acq.summary(acq.loadPipeline(DATA), acq.loadConstraints(BRAIN)));
+    if (url.pathname === '/api/pipeline/advance' && req.method === 'POST') return json(res, 200, pipelineAdvance());
+    const pm = url.pathname.match(/^\/api\/pipeline\/([^/]+)\/mark$/);
+    if (pm && req.method === 'POST') { const b = await body(req); const r = pipelineMark(decodeURIComponent(pm[1]), String(b.event || ''), String(b.note || '').trim().slice(0, 300)); return json(res, r.error ? 400 : 200, r); } // everything waiting on the owner, as decisions
     if (url.pathname === '/api/office/pause' && req.method === 'POST') { const b = await body(req); return json(res, 200, { ok: true, paused: setPaused(true, b.why) }); }
     if (url.pathname === '/api/office/resume' && req.method === 'POST') { return json(res, 200, { ok: true, paused: setPaused(false) }); }
     const own = url.pathname.match(/^\/api\/tasks\/([^/]+)\/(cancel|reassign|checked|answer|handoff)$/);
@@ -961,7 +1023,10 @@ server.listen(cfg.port, HOST, () => {
   console.log(`  brain history: ${brainGit.enabled() ? 'on — every agent write is committed to ' + BRAIN + ' (git log to review, git revert to undo)' : 'OFF'}`);
   const rl = loadRoutines(); const nx = rl.filter(r => !r.paused && r.nextAt).sort((a, b) => a.nextAt - b.nextAt)[0];
   console.log(`  routines: ${rl.length} loaded${rl.some(r => r.paused) ? ' (' + rl.filter(r => r.paused).length + ' paused)' : ''}${nx ? ' · next ' + untilText(nx.nextAt) + ' ' + nx.title.toUpperCase() + ' (' + nx.agent + ')' : ''} · ${rlist.path}`);
+  if (!fs.existsSync(acq.constraintsFile(BRAIN))) { try { fs.mkdirSync(path.dirname(acq.constraintsFile(BRAIN)), { recursive: true }); fs.writeFileSync(acq.constraintsFile(BRAIN), JSON.stringify(acq.template(), null, 2) + '\n'); console.log(`  acquisition: wrote ${acq.constraintsFile(BRAIN)} with every limit unset — the owner fills it in`); } catch {} }
   recoverTasks(); // before the clock: pick up what a crash or restart left mid-flight
+  pipelineSync();
+  { const c = acq.loadConstraints(BRAIN); console.log(`  acquisition workflow: ${c.active ? 'ACTIVE' : 'off — ' + (c.missing.length ? 'not set: ' + c.missing.join(', ') : '"active" is not true')}`); }
   if (CLOCK_ON) { setInterval(tickRoutines, 20000); tickRoutines(); } // the clock: every 20 s; the first tick catches up anything missed while the office was off (once, marked LATE)
   else console.log('  clock: OFF (AO_CLOCK=off) — no routine will fire');
   console.log(`  agents: ${AGENTS.length} (${roster.customised} customised${roster.briefed ? ', ' + roster.briefed + ' briefed' : ''}${roster.files.length ? ' via ' + roster.files.join(' + ') : ''})   tools: ${backend === 'claude-cli' ? 'connected MCP servers' + (cfg.tools?.web === false ? '' : ' + web') : 'none on the API backend'}`);

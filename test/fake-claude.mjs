@@ -45,6 +45,15 @@ process.stdin.on('end', async () => {
   if (marker[1] === 'error') { emit({ type: 'result', subtype: 'error_during_execution', is_error: true, result: 'API Error: overloaded' }); return process.exit(0); }
   if (marker[1] === 'exit') { emit({ type: 'assistant', message: { content: [{ type: 'text', text: 'half a draft' }] } }); process.stderr.write('boom\n'); return process.exit(3); }
   if (marker[1] === 'empty') return process.exit(0);
+  if (/PIPELINE STEP: research/.test(user)) { // the prospects come from the test's fixture file, never from the network
+    const list = process.env.FAKE_PROSPECTS ? fs.readFileSync(process.env.FAKE_PROSPECTS, 'utf8') : '[]';
+    emit({ type: 'result', subtype: 'success', is_error: false, result: `Researched against the ICP.\n\`\`\`prospects\n${list}\n\`\`\`` }); return process.exit(0);
+  }
+  if (/PIPELINE STEP: qualify/.test(user)) {
+    const keys = [...user.matchAll(/^KEY: (\S+)/gm)].map(m => m[1]);
+    const out = keys.map(key => /unclear/.test(key) ? { key, fit: 'unclear', reasons: [], disqualifiers: [], missing: ['headcount not found'] } : { key, fit: 'yes', reasons: ['12-person consultancy growing on referrals (cited)'], disqualifiers: [], missing: [] });
+    emit({ type: 'result', subtype: 'success', is_error: false, result: `Qualified.\n\`\`\`qualification\n${JSON.stringify(out)}\n\`\`\`` }); return process.exit(0);
+  }
   if (marker[1] === 'nothing' && mode === 'draft') { emit({ type: 'result', subtype: 'success', is_error: false, result: '**NOTHING TO SEND**\nChecked the inbox: no enquiries.' }); return process.exit(0); }
   if (mode === 'approve') {
     if (marker[1] === 'prefail') { process.stderr.write('auth expired\n'); return process.exit(1); }
@@ -52,6 +61,7 @@ process.stdin.on('end', async () => {
     log({ mode: 'SEND', request });
     if (marker[1] === 'sendfail') { await sleep(50); return process.exit(1); }
     emit({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 's1', is_error: false }] } });
+    emit({ type: 'result', subtype: 'success', is_error: false, result: `Sent as approved.\nREF: fake-msg-${Date.now()}` }); return process.exit(0);
   }
   let extra = '';
   if (mode !== 'approve') {

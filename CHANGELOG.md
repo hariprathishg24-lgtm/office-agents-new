@@ -24,6 +24,11 @@ Phases 0–2 of the reliability handoff, plus the prompt-honesty part of Phase 3
   - Every outbound draft is read by an **independent reviewer** (QA by default; `review.outbound` in the config, `false` to turn it off) before the owner sees it. A FAIL is shown beside the draft and never sends anything; the owner still decides.
   - Owner controls: **pause and resume the whole office** (`/api/office/pause`, `/api/office/resume`: nothing new starts, not even an approval), cancel, reassign (history kept), reconcile an unknown outcome (`checked` with `sent: true/false`), and `GET /api/pending`, which lists every decision waiting on the owner in plain sentences.
   - Every state change is written into `task.history` with its reason. `npm test` gains 12 coordination checks (40 total), and the browser drill covers a blocked task and the pause.
+- **The first-client acquisition workflow (Phase 6).** research → qualify → draft → QA review → owner approval → send, logged with its remote reference → follow-ups → proposal → signed → delivery plan, each step an ordinary task (`acquisition.mjs`, `data/pipeline.json`, `/api/pipeline`).
+  - A prospect without a source URL is rejected. Duplicates (by domain) and opted-out prospects never re-enter. An unclear fit goes to the owner, never a score.
+  - A prospect gets at most one open draft. Follow-ups use only the owner's cadence and limit. Won needs a sent proposal and the owner saying what was signed. Research that finds nothing is a visible no-op, not an approval request.
+  - It starts nothing until the owner sets `outreachPerDayMax`, `followUpDays`, `maxFollowUps` and `spendCeiling` in `<brain>/Agents Office/acquisition.json` (written with every value unset) and sets `"active": true`. The missing limits show in `/api/pending`.
+  - Proved end to end on a fixture prospect: exactly three sends (first touch, one follow-up, proposal), no duplicate outreach. `npm test` gains 12 acquisition checks (54 total).
 - A folder named like a note inside `Agents Office/` no longer makes every task fail. Notes record the model that did the work, not the first model the CLI listed.
 
 ## 3.6.1-beta.1 — 9 Sep 2026

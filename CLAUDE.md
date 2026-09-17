@@ -86,6 +86,15 @@ A brief or a skill says how an agent should work. It does not show the agent can
 - **Fixtures:** `<brain>/Agents Office/fixtures/<id>/normal.md`, `missing-input.md`, `misleading-input.md`, each a task written as the owner would type it, plus what a good answer must and must not do.
 - **Review:** `fixtures/<id>/review.json` → `{ "contractHash": "<first 16 hex of sha256 of the contract file>", "passed": true, "reviewedBy": "owner", "reviewedAt": "<date>", "notes": "…" }`. Only the owner marks a review passed. Editing the contract voids the review.
 
+## The first-client acquisition workflow
+
+The loop that wins the first client runs as ordinary tasks: research (PROSPECTOR) → qualify (SALES LEAD) → first-touch draft (PROSPECTOR) → QA review → the owner's approval → send, logged with its remote reference → follow-ups (FOLLOW UPS) → proposal (PROPOSALS) → signed → delivery plan (DELIVERY LEAD). Its state is in `data/pipeline.json` (`GET /api/pipeline`).
+
+- **It starts nothing until the owner sets its limits** in `<brain>/Agents Office/acquisition.json`: `outreachPerDayMax`, `followUpDays`, `maxFollowUps`, `spendCeiling` (all required), `deadline` (optional), then `"active": true`. These are the owner's decisions. Never fill them in yourself; if they ask you to, write exactly the numbers they give.
+- When active, it advances every 30 minutes on the clock, or on `POST /api/pipeline/advance`.
+- The owner reports what happened with `POST /api/pipeline/<key>/mark` `{ "event": …, "note": … }`. Events: `replied`, `interested` (starts a proposal draft), `not-interested`, `opted-out` (never contacted again), `qualified` / `disqualified` (for prospects waiting on review), `signed` (needs a sent proposal and a note saying what was signed; starts the delivery plan), `lost`.
+- A prospect with no source URL is rejected, and an unclear fit goes to the owner, never a score. Everything waiting on the owner is in `GET /api/pending`.
+
 ## Lessons and the set-up interview
 
 Two more things the office writes into the brain on its own. Both are plain files you may edit when the owner asks.

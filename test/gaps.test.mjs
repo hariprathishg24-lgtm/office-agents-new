@@ -165,7 +165,7 @@ describe('deadlines, budgets and limits in a running office', () => {
     const item = (await pending()).find(i => i.kind === 'approval' && i.id === t.id);
     assert.ok(item?.limited, 'the approval is marked limited');
     const refused = await office.api('POST', `/api/tasks/${t.id}/approve`, { waitingAt: d.waitingAt });
-    assert.equal(refused.status, 409); assert.match(refused.body.error, /Nothing was sent/);
+    assert.equal(refused.status, 409); assert.match(refused.body.error, /Nothing was sent/); assert.equal(refused.body.limited, true, 'the page can tell a seat limit from other refusals');
     assert.equal((await office.api('POST', `/api/tasks/${t.id}/approve`, { waitingAt: d.waitingAt, override: { approvedBy: 'owner' } })).status, 409, 'an override needs a reason');
     const ok = await office.api('POST', `/api/tasks/${t.id}/approve`, { waitingAt: d.waitingAt, override: { approvedBy: 'owner', reason: 'I read this one myself' } });
     assert.equal(ok.status, 200, JSON.stringify(ok.body));

@@ -78,6 +78,27 @@ try {
     await main.close();
     return out.join(' · ') + ` · pause and resume from a phone · the 3D office at 390px scrolls sideways by ${mainOverflow}px`;
   });
+  await step('an unproven seat\'s send is refused on the page, then sent on the owner\'s "send anyway: <why>"', async () => {
+    const s2 = scratch('browser-limited');
+    const limited = await startOffice({ brain: s2.brain, data: s2.data, env: { AO_REQUIRE_FOR_OUTBOUND: 'contracted' } });
+    const p = await browser.newPage({ viewport: { width: 1512, height: 900 } }); p.on('pageerror', e => errs.push('limited: ' + e.message));
+    try {
+      const t = (await limited.api('POST', '/api/tasks', { dept: 'sales', text: 'send an email to the limited drill prospect' })).body;
+      await limited.api('POST', `/api/tasks/${t.id}/run`);
+      await p.goto(limited.base + '/', { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await p.waitForFunction(id => window.CC?.tasks?.tasks.find(x => x.sid === id)?.state === 'waiting', t.id, { timeout: 30000 });
+      await p.evaluate(a => window.CC.tasks.resolveLive(a, true), t.agent);
+      await sleep(1500);
+      if ((await limited.task(t.id)).state !== 'waiting' || limited.calls().some(c => c.mode === 'SEND')) throw new Error('the limited send was not refused');
+      await p.waitForFunction(id => window.CC.tasks.tasks.find(x => x.sid === id)?.state === 'waiting', t.id, { timeout: 20000 });
+      const took = await p.evaluate(a => window.CC.tasks.overrideLive(a, 'send anyway: I read it myself'), t.agent);
+      if (!took) throw new Error('the page did not offer the override');
+      const done = await limited.until(t.id, x => x.state === 'done', 20000);
+      if (done.approval?.override?.reason !== 'I read it myself') throw new Error('the reason was not recorded: ' + JSON.stringify(done.approval));
+      const n = limited.calls().filter(c => c.mode === 'SEND').length; if (n !== 1) throw new Error(`${n} sends`);
+      return `refused at "${done.approval.seatLevel}", then 1 send with the owner's reason recorded`;
+    } finally { await p.close(); await limited.stop(); s2.cleanup(); }
+  });
   await step('no page errors', async () => { if (errs.length) throw new Error(errs[0]); });
 } catch { failed = true; }
 finally { if (browser) await browser.close(); await office.stop(); s.cleanup(); }

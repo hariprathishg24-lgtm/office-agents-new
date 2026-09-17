@@ -1143,7 +1143,7 @@ const server = http.createServer(async (req, res) => {
       const b = await body(req);
       const note = String(b.feedback || '').trim();
       const c = claim(m[1], m[2], { waitingAt: b.waitingAt, override: b.override }); // after the body is read: nothing may await between the check and the claim
-      if (c.error) return json(res, c.status, { error: c.error, state: c.task?.state });
+      if (c.error) return json(res, c.status, { error: c.error, state: c.task?.state, ...(c.limited ? { limited: true } : {}) });
       console.log(`${m[2] === 'approve' ? '✅' : '↩'} ${c.task.id} ${m[2] === 'approve' ? 'approved — ' + agentName(c.task.agent) + ' is sending' : 'sent back: ' + note.slice(0, 80)}`);
       enqueue(() => execute(c.task.id, c.attempt.id, m[2] === 'reject' ? { feedback: note || 'Not this. Rework it.' } : {}))
         .then(t => { if (m[2] === 'reject' && note && t && t.state === 'waiting' && !t.lastError) learnFrom(t, note); })

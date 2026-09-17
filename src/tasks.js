@@ -763,12 +763,21 @@ export function initTasks(ctx) {
     const t = tasks.find(x => x.live && x.agent === agentId && x.state === 'waiting'); if (!t) return false;
     if (approved) { // the approval names the draft the owner saw: if the server has a newer one, it refuses
       toDoing(t); chatPush(agentId, { who: 'agent', text: '✓ Approved — sending it now. It lands here when it is done.' });
-      post(`/tasks/${t.sid}/approve`, { waitingAt: t.draftAt }).then(j => { if (j && j.ok) return; chatPush(agentId, { who: 'agent', text: `Not sent — ${j && j.error ? j.error : 'the office did not answer'}.` }); t.claimedAt = 0; poll(); });
+      post(`/tasks/${t.sid}/approve`, { waitingAt: t.draftAt }).then(j => { if (j && j.ok) return; if (j && j.limited) pendingOverride[agentId] = { sid: t.sid, draftAt: t.draftAt }; chatPush(agentId, { who: 'agent', text: j && j.limited ? `Not sent — this seat has not been proved for outbound work yet. To send it on your say-so, reply "send anyway: <why>". The reason is recorded with the approval.` : `Not sent — ${j && j.error ? j.error : 'the office did not answer'}.` }); t.claimedAt = 0; poll(); });
     }
     else { pendingFeedback[agentId] = t.sid; chatPush(agentId, { who: 'agent', text: 'Understood. What should change? Tell me here and I will redo it — it comes back for your OK.' }); }
     return true;
   }
   const pendingReject = agentId => !!pendingFeedback[agentId];
+  const pendingOverride = {}; // agentId → the draft a seat limit refused: "send anyway: <why>" approves it as the owner's override
+  function overrideLive(agentId, text) {
+    const m = String(text).match(/^\s*send anyway\s*[:\-–]\s*(.+)$/i); const p = pendingOverride[agentId]; if (!m || !p) return false;
+    delete pendingOverride[agentId];
+    const t = tasks.find(x => x.live && x.sid === p.sid && x.state === 'waiting'); if (!t) return false;
+    toDoing(t); chatPush(agentId, { who: 'agent', text: '✓ Sending it on your say-so. Your reason is recorded with the approval.' });
+    post(`/tasks/${t.sid}/approve`, { waitingAt: p.draftAt, override: { approvedBy: 'owner', reason: m[1].trim() } }).then(j => { if (j && j.ok) return; chatPush(agentId, { who: 'agent', text: `Not sent — ${j && j.error ? j.error : 'the office did not answer'}.` }); t.claimedAt = 0; poll(); });
+    return true;
+  }
   function rejectLive(agentId, feedback) {
     const sid = pendingFeedback[agentId]; delete pendingFeedback[agentId];
     const t = tasks.find(x => x.live && x.sid === sid); if (!t) return false;
@@ -1109,5 +1118,5 @@ export function initTasks(ctx) {
 
   return { tick, toggle, open, close, openFor, isOpen, boardWidth, onFocusChange, onStuck, onResolve,
            handleChat, addTask, revise, rowHTML, setDept, tasks, panelWidth: () => panel.offsetWidth, isLive: () => live,
-           routines, addRoutine, rtAct, railFor, syncPills, refresh: poll, resolveLive, pendingReject, rejectLive, officeModel: () => officeModel, chosenModel, chosenEffort };
+           routines, addRoutine, rtAct, railFor, syncPills, refresh: poll, resolveLive, pendingReject, rejectLive, overrideLive, officeModel: () => officeModel, chosenModel, chosenEffort };
 }

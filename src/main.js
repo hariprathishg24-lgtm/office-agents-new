@@ -1192,6 +1192,7 @@ function sendChat(text) {
   document.getElementById('mIn').value = ''; if (window.__growChat) window.__growChat();
   const low = text.toLowerCase();
   setTimeout(() => {
+    if (tasks && tasks.overrideLive(id, text)) return; // "send anyway: <why>" after a seat limit refused the send
     if (tasks && tasks.pendingReject(id)) { tasks.rejectLive(id, text); return; } // V3.5: the line after REJECT is the note the agent reworks with
     if (r.state === 'stuck' && /\b(approve|reject)\b/.test(low)) {
       resolveApproval(id, /approve/.test(low));

@@ -95,6 +95,14 @@ The loop that wins the first client runs as ordinary tasks: research (PROSPECTOR
 - The owner reports what happened with `POST /api/pipeline/<key>/mark` `{ "event": …, "note": … }`. Events: `replied`, `interested` (starts a proposal draft), `not-interested`, `opted-out` (never contacted again), `qualified` / `disqualified` (for prospects waiting on review), `signed` (needs a sent proposal and a note saying what was signed; starts the delivery plan), `lost`.
 - A prospect with no source URL is rejected, and an unclear fit goes to the owner, never a score. Everything waiting on the owner is in `GET /api/pending`.
 
+## Industry research
+
+One research run for the whole office (INTEL, `scout`), not 119 agents browsing. It is configured in `<brain>/Agents Office/research.json`: `runsPerWeek` and `findingsPerRun` (the owner's budget, required), `day` / `at` (when it runs), `staleDays`, and `topics` (`id`, `question`, `roles`). It runs on the clock only with `"active": true`, and never past the weekly budget.
+
+- The server decides what survives. A finding with no URL, publisher, dates or known role is rejected. So is a proposed change with neither a first-party source nor a corroborating URL. An old source is kept but flagged stale and never shown to agents. A finding that would change a price, permission, contract, payment term or commitment is **blocked** and becomes an owner decision. A failed run is a visible gap in `/api/pending`, never a digest.
+- Accepted findings reach only the roles they name, labelled as external evidence that never overrides the company notes.
+- A finding becomes a rule in a skill only through `POST /api/research/findings/<key>/publish` `{ "skill", "rule", "approvedBy": "owner" }`. Do that only when the owner has said to, in those terms. The previous text is kept in `<brain>/Agents Office/skill-versions/`, and `POST /api/research/rollback` `{ "skill", "why" }` restores it. `GET /api/research` shows what was found, rejected, published and rolled back.
+
 ## Lessons and the set-up interview
 
 Two more things the office writes into the brain on its own. Both are plain files you may edit when the owner asks.

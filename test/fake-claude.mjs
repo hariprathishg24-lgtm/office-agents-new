@@ -45,6 +45,12 @@ process.stdin.on('end', async () => {
   if (marker[1] === 'error') { emit({ type: 'result', subtype: 'error_during_execution', is_error: true, result: 'API Error: overloaded' }); return process.exit(0); }
   if (marker[1] === 'exit') { emit({ type: 'assistant', message: { content: [{ type: 'text', text: 'half a draft' }] } }); process.stderr.write('boom\n'); return process.exit(3); }
   if (marker[1] === 'empty') return process.exit(0);
+  if (/RESEARCH STEP: findings/.test(user)) { // findings come from the test's fixture file; ERROR = the feed/tool failed; NOBLOCK = an unreadable result
+    const src = process.env.FAKE_FINDINGS || '';
+    if (src === 'ERROR') { emit({ type: 'result', subtype: 'error_during_execution', is_error: true, result: 'web search tool unavailable' }); return process.exit(0); }
+    if (src === 'NOBLOCK') { emit({ type: 'result', subtype: 'success', is_error: false, result: 'Here is a nice digest with no sources.' }); return process.exit(0); }
+    emit({ type: 'result', subtype: 'success', is_error: false, result: `Research digest.\n\`\`\`findings\n${src ? fs.readFileSync(src, 'utf8') : '[]'}\n\`\`\`` }); return process.exit(0);
+  }
   if (/PIPELINE STEP: research/.test(user)) { // the prospects come from the test's fixture file, never from the network
     const list = process.env.FAKE_PROSPECTS ? fs.readFileSync(process.env.FAKE_PROSPECTS, 'utf8') : '[]';
     emit({ type: 'result', subtype: 'success', is_error: false, result: `Researched against the ICP.\n\`\`\`prospects\n${list}\n\`\`\`` }); return process.exit(0);

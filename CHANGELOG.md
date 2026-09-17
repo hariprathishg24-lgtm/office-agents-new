@@ -29,6 +29,10 @@ Phases 0–2 of the reliability handoff, plus the prompt-honesty part of Phase 3
   - A prospect gets at most one open draft. Follow-ups use only the owner's cadence and limit. Won needs a sent proposal and the owner saying what was signed. Research that finds nothing is a visible no-op, not an approval request.
   - It starts nothing until the owner sets `outreachPerDayMax`, `followUpDays`, `maxFollowUps` and `spendCeiling` in `<brain>/Agents Office/acquisition.json` (written with every value unset) and sets `"active": true`. The missing limits show in `/api/pending`.
   - Proved end to end on a fixture prospect: exactly three sends (first touch, one follow-up, proposal), no duplicate outreach. `npm test` gains 12 acquisition checks (54 total).
+- **Regular industry learning (Phase 5).** One research run for the office (INTEL), on the owner's weekly budget and topics (`<brain>/Agents Office/research.json`, written with the budget unset; `research.mjs`, `/api/research`).
+  - Findings are checked by the server, not the model: uncited, undated or role-less findings are rejected, and so are unsupported proposals (no first-party source, no corroboration). Old sources are flagged stale. Anything touching prices, permissions, contracts, payment or commitments is blocked and put to the owner. A failed run is a visible gap.
+  - Accepted findings reach only the roles they name, as evidence. A rule reaches a skill only when the owner publishes it; the previous skill text is versioned and one call rolls it back. Stats cover found, rejected (by reason), stale, blocked, published and rolled back.
+  - `npm test` gains 8 research checks (62 total).
 - A folder named like a note inside `Agents Office/` no longer makes every task fail. Notes record the model that did the work, not the first model the CLI listed.
 
 ## 3.6.1-beta.1 — 9 Sep 2026

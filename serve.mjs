@@ -49,6 +49,7 @@ import * as brainGit from './brain-git.mjs';
 import { scrub } from './scrub.mjs';
 import * as coord from './coordinator.mjs';
 import * as acq from './acquisition.mjs';
+import * as research from './research.mjs';
 
 const cfg = loadConfig();
 const HTML = path.join(ROOT, 'dist', 'command-centre-v2.html'); // built by build.mjs; shipped so npm start works without a build
@@ -328,7 +329,8 @@ function rosterText(dept) { return AGENTS.filter(a => a.department === dept).map
 // what an agent is told about itself: the job, the owner's standing instructions, the skills it follows
 function agentBrief(a) {
   const lessons = learn.promptText(BRAIN, a);
-  return (a.brief ? `\nSTANDING INSTRUCTIONS FROM THE OWNER\n${a.brief}\n` : '') + (skills.promptText(a) ? `\n${skills.promptText(a)}\n` : '') + (lessons ? `\n${lessons}\n` : '');
+  let found = ''; try { found = research.promptText(research.forAgent(research.loadState(DATA), a.id)); } catch {} // reviewed industry findings, only for the roles they name
+  return (a.brief ? `\nSTANDING INSTRUCTIONS FROM THE OWNER\n${a.brief}\n` : '') + (skills.promptText(a) ? `\n${skills.promptText(a)}\n` : '') + (lessons ? `\n${lessons}\n` : '') + (found ? `\n${found}\n` : '');
 }
 const toolKeys = names => [...new Set(names.map(n => /^mcp__/.test(n) ? mcp.keyOf(n) : n === 'WebSearch' || n === 'WebFetch' ? 'web' : null).filter(Boolean))];
 async function route(dept, text) {
@@ -626,6 +628,7 @@ async function execute(id, attemptId, { feedback } = {}) {
   for (const n of made) console.log(`  ↳ handoff ${n.id} → ${n.agent}: ${n.title}`);
   for (const n of [...made, ...runnable]) enqueue(() => startQueued(n.id)); // a handoff starts as next (its prerequisite just finished); the queue takes it
   if (t.pipeline) pipelineSync();
+  if (t.research) researchSync();
   if (t.filed === 'ok' && t.state === 'done') await rebuildGraph();
   const tag = t.needsCheck ? '? outcome unknown' : t.error ? '✗ failed' : t.state === 'waiting' ? `⏸ waiting for your OK${t.review ? ' (review: ' + t.review.verdict + ')' : ''}` : a.outcome === 'error' ? '✗ revision failed, previous result kept' : '✓ done';
   console.log(`${tag.slice(0, 1)} ${t.id} ${tag.slice(2)} (${a.action}/${a.mode}${failure ? ': ' + failure.message.slice(0, 160) : ''}${t.tools?.length ? ', tools: ' + t.tools.join(' ') : ''}${t.note && t.filed === 'ok' && !failure ? ', note: ' + t.note : ''})`);
@@ -633,10 +636,10 @@ async function execute(id, attemptId, { feedback } = {}) {
 }
 
 /* ---------- the owner's controls over tasks (Phase 7) ---------- */
-function newTask({ dept, agent, title, text, needsOk, after = [], goal, by = 'you', plan = [], why = '', model, effort, pipeline }) {
+function newTask({ dept, agent, title, text, needsOk, after = [], goal, by = 'you', plan = [], why = '', model, effort, pipeline, extra = {} }) {
   const list = load();
   const known = after.filter(id => list.some(t => t.id === id));
-  const task = { id: nid(), dept, agent, title, text, plan, eta: 15, why, needsOk, state: coord.initialState(known, list), addedAt: Date.now(), by, ...(known.length ? { after: known } : {}), ...(goal ? { goal } : {}), ...(pipeline ? { pipeline } : {}), model, effort, because: known.length ? `created; waits for ${known.length} task${known.length > 1 ? 's' : ''}` : 'created' };
+  const task = { id: nid(), dept, agent, title, text, plan, eta: 15, why, needsOk, state: coord.initialState(known, list), addedAt: Date.now(), by, ...(known.length ? { after: known } : {}), ...(goal ? { goal } : {}), ...(pipeline ? { pipeline } : {}), ...extra, model, effort, because: known.length ? `created; waits for ${known.length} task${known.length > 1 ? 's' : ''}` : 'created' };
   list.push(task); coord.unblock(list); save(list);
   if (task.state === 'next' && serverRuns(task)) enqueue(() => startQueued(task.id));
   return list.find(t => t.id === task.id);
@@ -728,6 +731,46 @@ function pipelineMark(key, event, note) {
   }
   return { prospect: r.prospect, task };
 }
+/* ---------- regular industry learning (Phase 5, research.mjs) ---------- */
+function researchSync() {
+  let st, tasks; try { st = research.loadState(DATA); tasks = load(); } catch (e) { console.warn('  ✗ research:', e.message); return; }
+  const cfg2 = research.loadConfig(BRAIN), ids = AGENTS.map(a => a.id);
+  let changed = false;
+  for (const t of tasks.filter(t => t.research)) { const r = research.recordTask(st, t, { config: cfg2.config, agentIds: ids }); if (r) { changed = true; console.log(`  ◇ research ${t.id}: ${r.outcome === 'gap' ? 'GAP — ' + r.gap : r.outcome === 'ok' ? `${r.accepted} accepted, ${r.stale} stale, ${r.blocked} blocked, ${r.rejected.length} rejected, ${r.duplicates} duplicate` : r.outcome}`); } }
+  if (changed) research.saveState(DATA, st);
+}
+function researchRun({ by = 'you' } = {}) {
+  const c = research.loadConfig(BRAIN);
+  if (c.missing.length) return { status: 409, error: `research is not configured: ${c.missing.join(', ')} not set in ${c.file}. Budget and topics are the owner's to set.` };
+  if (office.paused) return { status: 423, error: 'the office is paused' };
+  let st; try { st = research.loadState(DATA); } catch (e) { return { status: 500, error: e.message }; }
+  const b = research.budget(st, c.config);
+  if (b.left <= 0) return { status: 429, error: `this week's research budget is spent (${b.used} of ${b.limit} runs) — it resets on Monday` };
+  if (load().some(t => t.research && !coord.TERMINAL.includes(t.state))) return { status: 409, error: 'a research run is already open' };
+  const spec = research.taskFor(c.config, st); const agent = AGENTS.find(x => x.id === spec.agent);
+  if (!agent) return { status: 500, error: `no ${spec.agent} agent on the roster` };
+  const t = newTask({ dept: agent.department, agent: agent.id, title: spec.title, text: spec.text, needsOk: false, by: by === 'you' ? 'research' : 'research', why: by === 'clock' ? 'the weekly research run' : 'research run started by the owner', extra: { research: true } });
+  st.runs.push({ taskId: t.id, startedAt: t.addedAt, by }); research.saveState(DATA, st);
+  console.log(`  ◆ research run ${t.id} (${b.used + 1} of ${b.limit} this week)`);
+  return { task: t, budget: { ...b, used: b.used + 1, left: b.left - 1 } };
+}
+let lastResearchCheck = 0;
+function researchClock(now = Date.now()) { // weekly, on the owner's day and time, inside the owner's budget
+  if (now - lastResearchCheck < 5 * 60 * 1000) return; lastResearchCheck = now;
+  const c = research.loadConfig(BRAIN); if (!c.active) return;
+  const d = new Date(now), [hh, mm] = String(c.config.at || '08:00').split(':').map(Number);
+  if (d.getDay() !== Number(c.config.day ?? 1) || d.getHours() * 60 + d.getMinutes() < hh * 60 + (mm || 0)) return;
+  let st; try { st = research.loadState(DATA); } catch { return; }
+  const today = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  if (st.runs.some(r => r.startedAt >= today)) return;
+  const r = researchRun({ by: 'clock' }); if (r.error) console.log(`  ◇ research not run: ${r.error}`);
+}
+function researchDecisions() {
+  const items = []; let st; try { st = research.loadState(DATA); } catch { return items; }
+  for (const r of st.runs.filter(r => r.outcome === 'gap' && Date.now() - (r.endedAt || 0) < 7 * 864e5)) items.push({ kind: 'research-gap', id: r.taskId, decision: 'The research run left a gap: ' + r.gap + '.' });
+  for (const x of st.findings.filter(x => x.status === 'blocked')) items.push({ kind: 'research-blocked', key: x.key, decision: 'Research found something that would change a price, permission, contract or commitment: "' + x.claim.slice(0, 160) + '" (' + x.publisher + ', ' + x.sourceUrl + '). Proposed: ' + x.proposedAction + '. That is your decision; research cannot make it.' });
+  return items;
+}
 function pipelineDecisions() { // for /api/pending: what the workflow needs from the owner
   const c = acq.loadConstraints(BRAIN), items = [];
   if (!c.active) items.push({ kind: 'acquisition-constraints', decision: c.missing.length ? `Set the acquisition limits in ${c.file}: ${c.missing.map(k => `${k} — ${acq.CONSTRAINTS[k]}`).join('; ')}. Then set "active": true. Until then the workflow starts nothing.` : `Set "active": true in ${c.file} to start the acquisition workflow.` });
@@ -805,6 +848,7 @@ async function routinesHeld() {
 let lastPipelineTick = 0;
 async function tickRoutines() {
   if (office.paused) return; // paused: routines stay due and fire once the owner resumes
+  researchClock();
   let list; try { list = loadRoutines(); } catch (e) { console.warn('routines:', e.message); return; }
   const dueNow = routines.due(list, RSTATE);
   if (Date.now() - lastPipelineTick > 30 * 60 * 1000 && acq.loadConstraints(BRAIN).active && !(await routinesHeld())) { lastPipelineTick = Date.now(); pipelineAdvance(); } // the workflow's own heartbeat: every 30 min, only when active
@@ -938,7 +982,12 @@ const server = http.createServer(async (req, res) => {
       console.log(`+ ${task.id} → ${task.agent}: ${task.title}${task.needsOk ? ' (drafts first, waits for your OK)' : ''}${task.state === 'blocked' ? ' (' + task.blockedReason + ')' : ''}`);
       return json(res, 200, task);
     }
-    if (url.pathname === '/api/pending' && req.method === 'GET') { const p = coord.pending(load(), { paused: pausedNow(), agentName }); p.items.push(...pipelineDecisions()); p.count = p.items.length; return json(res, 200, p); }
+    if (url.pathname === '/api/pending' && req.method === 'GET') { const p = coord.pending(load(), { paused: pausedNow(), agentName }); p.items.push(...pipelineDecisions(), ...researchDecisions()); p.count = p.items.length; return json(res, 200, p); }
+    if (url.pathname === '/api/research' && req.method === 'GET') { const st = research.loadState(DATA); return json(res, 200, { ...research.stats(st, research.loadConfig(BRAIN)), findings: st.findings.slice(-50), published: st.published }); }
+    if (url.pathname === '/api/research/run' && req.method === 'POST') { const r = researchRun(); return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : r); }
+    if (url.pathname === '/api/research/rollback' && req.method === 'POST') { const b = await body(req); const st = research.loadState(DATA); const r = research.rollback(st, { brainPath: BRAIN, skill: b.skill, why: String(b.why || '') }); if (r.error) return json(res, r.status, { error: r.error }); research.saveState(DATA, st); refreshSkills(); brainGit.snapshot('research: rolled back ' + b.skill); console.log('  ↺ research rule rolled back from ' + b.skill); return json(res, 200, r); }
+    const rp = url.pathname.match(/^\/api\/research\/findings\/([a-f0-9]{16})\/publish$/);
+    if (rp && req.method === 'POST') { const b = await body(req); const st = research.loadState(DATA); const r = research.publish(st, { brainPath: BRAIN, shippedDir: path.join(ROOT, 'skills'), key: rp[1], skill: b.skill, rule: b.rule, approvedBy: b.approvedBy, tested: b.tested }); if (r.error) return json(res, r.status, { error: r.error }); research.saveState(DATA, st); refreshSkills(); brainGit.snapshot('research: published a rule to ' + r.published.skill); console.log('  ★ research rule published to ' + r.published.skill + ' v' + r.published.version); return json(res, 200, r); }
     if (url.pathname === '/api/pipeline' && req.method === 'GET') return json(res, 200, acq.summary(acq.loadPipeline(DATA), acq.loadConstraints(BRAIN)));
     if (url.pathname === '/api/pipeline/advance' && req.method === 'POST') return json(res, 200, pipelineAdvance());
     const pm = url.pathname.match(/^\/api\/pipeline\/([^/]+)\/mark$/);
@@ -1026,6 +1075,9 @@ server.listen(cfg.port, HOST, () => {
   if (!fs.existsSync(acq.constraintsFile(BRAIN))) { try { fs.mkdirSync(path.dirname(acq.constraintsFile(BRAIN)), { recursive: true }); fs.writeFileSync(acq.constraintsFile(BRAIN), JSON.stringify(acq.template(), null, 2) + '\n'); console.log(`  acquisition: wrote ${acq.constraintsFile(BRAIN)} with every limit unset — the owner fills it in`); } catch {} }
   recoverTasks(); // before the clock: pick up what a crash or restart left mid-flight
   pipelineSync();
+  researchSync();
+  if (!fs.existsSync(research.configFile(BRAIN))) { try { fs.writeFileSync(research.configFile(BRAIN), JSON.stringify(research.template(), null, 2) + String.fromCharCode(10)); console.log('  research: wrote ' + research.configFile(BRAIN) + ' with the budget unset'); } catch {} }
+  { const c = research.loadConfig(BRAIN); console.log('  research: ' + (c.active ? 'ACTIVE, ' + c.config.runsPerWeek + ' run(s) a week' : 'off — ' + (c.missing.length ? 'not set: ' + c.missing.join(', ') : '"active" is not true'))); }
   { const c = acq.loadConstraints(BRAIN); console.log(`  acquisition workflow: ${c.active ? 'ACTIVE' : 'off — ' + (c.missing.length ? 'not set: ' + c.missing.join(', ') : '"active" is not true')}`); }
   if (CLOCK_ON) { setInterval(tickRoutines, 20000); tickRoutines(); } // the clock: every 20 s; the first tick catches up anything missed while the office was off (once, marked LATE)
   else console.log('  clock: OFF (AO_CLOCK=off) — no routine will fire');

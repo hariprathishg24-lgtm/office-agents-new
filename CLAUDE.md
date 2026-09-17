@@ -86,6 +86,15 @@ A brief or a skill says how an agent should work. It does not show the agent can
 - **Fixtures:** `<brain>/Agents Office/fixtures/<id>/normal.md`, `missing-input.md`, `misleading-input.md`, each a task written as the owner would type it, plus what a good answer must and must not do.
 - **Review:** `fixtures/<id>/review.json` → `{ "contractHash": "<first 16 hex of sha256 of the contract file>", "passed": true, "reviewedBy": "owner", "reviewedAt": "<date>", "notes": "…" }`. Only the owner marks a review passed. Editing the contract voids the review.
 
+Readiness is also a limit, not only a label. Outbound work (a send, a post, a payment) from a seat below `readiness.requireForOutbound` in `office.config.json` (default `contracted`; `none` turns it off) is refused at the approval and nothing goes out. Only the owner can override it, with a reason — on the page, by replying `send anyway: <why>`; over the API, `POST /api/tasks/<id>/approve {"override": {"approvedBy": "owner", "reason": "…"}}`. Never send that override yourself, and never lower `requireForOutbound` to get a draft out; both are the owner's call.
+
+## Deadlines, budgets and what a seat costs
+
+A task may carry a deadline and a budget in dollars: `deadline` and `budget` on `POST /api/tasks`, and `POST /api/tasks/<id>/plan` `{ "deadline": …, "budget": { "usd": … } }` to set or move either afterwards. Set them only from what the owner said; do not invent a limit.
+
+- Every run records what Claude charged. A task that has reached its budget will not run, revise or rework again — it appears in `GET /api/pending` as `budget-spent`, and the owner raises the budget or cancels it. A deadline that has passed on unfinished work appears as `overdue`.
+- `npm run coverage` (and `GET /api/coverage`) reports per seat: tasks finished, failed, "nothing to send", corrections the owner sent back, drafts the reviewer failed, unknown outcomes, total cost and cost per finished task. Read these before claiming a seat works; they are measurements, not opinions.
+
 ## The first-client acquisition workflow
 
 The loop that wins the first client runs as ordinary tasks: research (PROSPECTOR) → qualify (SALES LEAD) → first-touch draft (PROSPECTOR) → QA review → the owner's approval → send, logged with its remote reference → follow-ups (FOLLOW UPS) → proposal (PROPOSALS) → signed → delivery plan (DELIVERY LEAD). Its state is in `data/pipeline.json` (`GET /api/pipeline`).
@@ -94,6 +103,7 @@ The loop that wins the first client runs as ordinary tasks: research (PROSPECTOR
 - When active, it advances every 30 minutes on the clock, or on `POST /api/pipeline/advance`.
 - The owner reports what happened with `POST /api/pipeline/<key>/mark` `{ "event": …, "note": … }`. Events: `replied`, `interested` (starts a proposal draft), `not-interested`, `opted-out` (never contacted again), `qualified` / `disqualified` (for prospects waiting on review), `signed` (needs a sent proposal and a note saying what was signed; starts the delivery plan), `lost`.
 - A prospect with no source URL is rejected, and an unclear fit goes to the owner, never a score. Everything waiting on the owner is in `GET /api/pending`.
+- `partnerRates`, `partnerMargin` and `paymentTerms` in the same file are optional and the owner's to set. A proposal states them word for word when they are set; when they are not, it must write "(payment terms to confirm)" or "(price to confirm)" and say partner work needs the partner's own quote. Never write a term, a partner price or a markup the owner has not given.
 
 ## Industry research
 
@@ -102,6 +112,8 @@ One research run for the whole office (INTEL, `scout`), not 119 agents browsing.
 - The server decides what survives. A finding with no URL, publisher, dates or known role is rejected. So is a proposed change with neither a first-party source nor a corroborating URL. An old source is kept but flagged stale and never shown to agents. A finding that would change a price, permission, contract, payment term or commitment is **blocked** and becomes an owner decision. A failed run is a visible gap in `/api/pending`, never a digest.
 - Accepted findings reach only the roles they name, labelled as external evidence that never overrides the company notes.
 - A finding becomes a rule in a skill only through `POST /api/research/findings/<key>/publish` `{ "skill", "rule", "approvedBy": "owner" }`. Do that only when the owner has said to, in those terms. The previous text is kept in `<brain>/Agents Office/skill-versions/`, and `POST /api/research/rollback` `{ "skill", "why" }` restores it. `GET /api/research` shows what was found, rejected, published and rolled back.
+- **Watched pages.** `watch` in `research.json` is a list of `{ id, url, roles, question }` with `watchEveryHours`. The office hashes each page's text; when it changes, one focused run goes to that question, inside the same weekly budget. A change the budget cannot cover, and a page that cannot be fetched, become owner decisions — they are never dropped. `POST /api/research/watch` checks the pages now.
+- **Did the rule help?** For every rule the owner published, `GET /api/research` → `effects` compares the affected seats' fixture pass rates before and after it. Worse results ask the owner to roll it back; a rule nothing has measured asks for a fixture run. More notes and longer prompts are not evidence of learning — only the seat's own cases, run again, are.
 
 ## Lessons and the set-up interview
 
@@ -155,7 +167,7 @@ Agents get only connected servers (plus web when enabled). They never get Bash, 
 
 ## Running the office
 
-`start-office.cmd` starts it and restarts a crash with backoff. `http://localhost:4520/ops` shows problems, decisions waiting on the owner, routines and readiness, with Pause, Resume and Stop. `POST /api/office/stop` stops it on purpose (exit code 3, not restarted). For it to start at logon: `scripts/install-autostart.ps1` (`-Check` to see what is registered). Only run that when the owner asks: it runs routines on their plan while they are logged in.
+`start-office.cmd` starts it and restarts a crash with backoff. It waits 15 s, 60 s, 135 s, 240 s between restarts (PowerShell, not `timeout`, which does not wait without a console) and gives up after 5 quick failures. `PORT` and `AO_LOG_DIR` can be set before it runs. While it is running, do not rewrite it in place — cmd reads a batch file by byte offset; stop the launcher first, then start the new one. `http://localhost:4520/ops` shows problems, decisions waiting on the owner, routines and readiness, with Pause, Resume and Stop. `POST /api/office/stop` stops it on purpose (exit code 3, not restarted). For it to start at logon: `scripts/install-autostart.ps1` (`-Check` to see what is registered). Only run that when the owner asks: it runs routines on their plan while they are logged in.
 
 ## Everything else
 

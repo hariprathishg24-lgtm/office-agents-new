@@ -87,3 +87,31 @@ Picked up the tree above (the ChatGPT pass) without reverting anything, reviewed
 ## Next for any agent
 
 Re-run `node fixtures.mjs qa`, then `iggy` and `ceo`, when plan usage is low: each seat costs about 3% of a session. Stop above ~60% on a day with routines due. Never write `review.json` yourself.
+
+# Later pass — 17 September 2026, evening (Claude)
+
+Built the six gaps the audit against the handoff PDF left open. `reliability-handoff` commits `6f5e4aa` and `5064334`.
+
+## Code changes
+
+- **Deadlines and budgets on a task.** `deadline` and `budget: { usd }` on `POST /api/tasks`, moved later with `POST /api/tasks/<id>/plan`. Every run records `costUSD` from Claude's own total. A task at its budget will not run, revise or rework until the owner raises it; `overdue` and `budget-spent` are pending decisions.
+- **Per-seat measures.** `GET /api/coverage` and `npm run coverage` now carry `measures` for every seat: finished, failed, nothing-to-send, cancelled, waiting, completion rate, corrections the owner sent back, drafts the reviewer failed, unknown outcomes, cost and cost per finished task. Fixture runs record their cost too.
+- **Unproven seats are limited.** `readiness.requireForOutbound` (default `contracted`, `AO_REQUIRE_FOR_OUTBOUND` overrides, `none` turns it off). An approval on a seat below the bar is refused and nothing is sent; the owner overrides with a reason, which is recorded on the approval with the seat's level. On the page: reply `send anyway: <why>`. All three drafts waiting today are from contracted seats, so none of them are blocked by this.
+- **Research watches pages and measures its own rules.** `watch` + `watchEveryHours` in `research.json`; a changed page starts one focused run inside the weekly budget, and a change it cannot cover or a page it cannot read becomes an owner decision. `GET /api/research` → `effects` compares each published rule's seats' fixture pass rates before and after; a regression asks for a rollback, an unmeasured rule asks for a fixture run.
+- **Commercial terms.** `partnerRates`, `partnerMargin`, `paymentTerms` in `acquisition.json` (optional, unset by default). Proposals state them verbatim or name them as not established.
+- **Launcher.** `timeout /t` does not wait when there is no console (a Scheduled Task, redirected input), so the restart backoff was doing nothing; it sleeps through PowerShell now. `PORT` and `AO_LOG_DIR` are settable, which is what lets the new test drive it.
+
+## Verification
+
+- `npm test` **95/95** (15 new: broken stdin, API timeout, port in use, usage hold, launcher restart and stop, budgets, overdue, measures, seat limits, terms, watched pages, rule effects).
+- `node check.mjs` **38/38**, browser drill **7/7** (with `AO_BUILD_LOCAL_FILES=1 CHECK_LIVE=0`).
+- The usage hold test pins the gauge with `AO_USAGE_PERCENT` — a test-only override; never set it on the office.
+- The browser drill now closes the desktop 3D page before loading the phone one: two software-rendered offices at once starved each other on this machine.
+
+## Live office
+
+Redeployed with nothing running: old launcher stopped first (cmd reads a batch file by byte offset, so rewriting it under a running launcher is unsafe), office stopped through `POST /api/office/stop`, new launcher started. Now pid 46112, launcher pid 38208, 27 tasks intact, 3 approvals waiting, plan session 11% / week 53%.
+
+## Still owner-only
+
+Unchanged from the pass above: seat reviews, acquisition limits and research budget, QA's PASS/FAIL format, autostart, and the 3 drafts. The new slots (`partnerRates`, `partnerMargin`, `paymentTerms`, task budgets and deadlines) are the owner's numbers — they are written as unset and stay that way until the owner gives them.

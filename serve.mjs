@@ -1122,7 +1122,7 @@ server.on('error', e => {
 // The heartbeat. Timers do not fire while the machine sleeps, so a long gap between beats is a sleep
 // (or the office being off), and it is surfaced rather than silently leaving routines late.
 const heartbeat = { last: null, sleeps: [] };
-{ const prev = office.lastHeartbeat; if (prev && STARTED - prev > 2 * 60 * 1000) heartbeat.sleeps.push({ from: prev, to: STARTED, kind: 'off' }); }
+{ const prev = office.lastHeartbeat; if (prev && STARTED - prev > 7 * 60 * 1000) heartbeat.sleeps.push({ from: prev, to: STARTED, kind: 'off' }); }
 let lastBeatSaved = 0;
 function beat(now = Date.now()) {
   if (heartbeat.last && now - heartbeat.last > 90 * 1000) { heartbeat.sleeps.push({ from: heartbeat.last, to: now, kind: 'asleep' }); console.log(`  ☾ the machine was asleep for ${Math.round((now - heartbeat.last) / 60000)} min`); }

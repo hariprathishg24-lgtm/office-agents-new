@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Office Operations</title>
+<style>
+  :root { --bg: #f6f5f1; --card: #ffffff; --ink: #1d1d1b; --muted: #6b6a64; --line: #e3e1da; --ok: #1e7a5a; --warn: #9a6a00; --bad: #b3261e; --accent: #1f4f99; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #151514; --card: #1f1f1d; --ink: #ecebe6; --muted: #a09e96; --line: #33322f; --ok: #5cc49a; --warn: #e0b04a; --bad: #f08a80; --accent: #8fb3f0; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { position: sticky; top: 0; z-index: 2; background: var(--card); border-bottom: 1px solid var(--line); padding: 12px 16px; display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: .02em; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; background: var(--muted); margin-right: 6px; vertical-align: middle; }
+  .dot.live { background: var(--ok); } .dot.paused { background: var(--warn); } .dot.down { background: var(--bad); }
+  #status { color: var(--muted); font-size: 13px; flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; }
+  button { font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { border-color: var(--bad); color: var(--bad); }
+  button:disabled { opacity: .5; cursor: default; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+  section.wide { grid-column: 1 / -1; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { padding: 9px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+  li:first-child { border-top: 0; }
+  .kind { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-right: 6px; }
+  .high { color: var(--bad); } .medium { color: var(--warn); } .low { color: var(--muted); }
+  .row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .row input { flex: 1 1 180px; min-width: 0; font: inherit; font-size: 13px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+  .stat b { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
+  .stat span { font-size: 12px; color: var(--muted); }
+  .muted { color: var(--muted); font-size: 13px; }
+  .empty { color: var(--muted); font-size: 13px; padding: 6px 0; }
+  .r-title { font-weight: 600; }
+  .bad { color: var(--bad); } .ok { color: var(--ok); }
+  @media (max-width: 720px) { main { grid-template-columns: minmax(0, 1fr); padding: 12px; gap: 12px; } header { padding: 10px 12px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="dot" id="dot"></span>Office operations</h1>
+  <div id="status">connecting…</div>
+  <button id="pause" disabled>Pause office</button>
+  <button id="stop" class="danger">Stop office</button>
+  <a href="/" class="muted">Open the office →</a>
+</header>
+<main>
+  <section class="wide"><h2>Problems</h2><ul id="problems"><li class="empty">—</li></ul></section>
+  <section class="wide"><h2>Decisions waiting on you <span id="dcount"></span></h2><ul id="decisions"><li class="empty">—</li></ul></section>
+  <section class="wide"><h2>Work</h2><div class="grid" id="counts"></div></section>
+  <section class="wide"><h2>Routines</h2><ul id="routines"><li class="empty">—</li></ul></section>
+  <section><h2>First-client workflow</h2><div id="pipeline" class="muted">—</div></section>
+  <section><h2>Industry research</h2><div id="research" class="muted">—</div></section>
+  <section><h2>Company notes — last changed</h2><ul id="fresh"><li class="empty">—</li></ul></section>
+  <section><h2>Readiness</h2><ul id="ready"><li class="empty">—</li></ul></section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const ago = t => { if (!t) return 'never'; const s = Math.round((Date.now() - t) / 1000); return s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 172800 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} days ago`; };
+const until = t => { if (!t) return '—'; const s = Math.round((t - Date.now()) / 60000); return s <= 0 ? 'due now' : s < 90 ? `in ${s} min` : s < 2880 ? `in ${Math.round(s / 60)} h` : `in ${Math.round(s / 1440)} days`; };
+const post = async (url, body) => { const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) }); const j = await r.json().catch(() => ({})); if (!r.ok) alert(j.error || r.statusText); return j; };
+let last = null, lastOk = 0;
+
+function decisionHTML(d) {
+  let actions = '';
+  if (d.kind === 'approval') actions = `<div class="row"><a href="/">Read and approve in the office →</a></div>`;
+  if (d.kind === 'unknown-outcome') actions = `<div class="row"><input placeholder="what you found (optional)" data-note><button data-act="checked" data-id="${esc(d.id)}" data-sent="true">It went out</button><button data-act="checked" data-id="${esc(d.id)}" data-sent="false">It did not go out</button></div>`;
+  if (d.kind === 'blocked' || d.kind === 'approval') actions += `<div class="row"><button class="danger" data-act="cancel" data-id="${esc(d.id)}">Cancel this task</button></div>`;
+  if (d.kind === 'question') actions = `<div class="row"><input placeholder="your answer" data-note><button class="primary" data-act="answer" data-id="${esc(d.id)}">Answer</button></div>`;
+  if (d.kind === 'prospect-review') actions = `<div class="row"><button data-act="mark" data-key="${esc(d.key)}" data-event="qualified">Qualified</button><button data-act="mark" data-key="${esc(d.key)}" data-event="disqualified">Disqualified</button></div>`;
+  return `<li><span class="kind">${esc(d.kind.replace(/-/g, ' '))}</span>${esc(d.decision)}${actions}</li>`;
+}
+
+async function refresh() {
+  let o, p;
+  try { [o, p] = await Promise.all([fetch('/api/ops').then(r => r.json()), fetch('/api/pending').then(r => r.json())]); }
+  catch { $('dot').className = 'dot down'; $('status').textContent = `The office is not answering${lastOk ? ' — last seen ' + ago(lastOk) : ''}. Is start-office.cmd running?`; $('pause').disabled = true; return; }
+  last = o; lastOk = Date.now();
+  const paused = o.paused && o.paused.paused;
+  $('dot').className = 'dot ' + (paused ? 'paused' : 'live');
+  $('status').textContent = `${paused ? 'PAUSED' + (o.paused.why ? ' (' + o.paused.why + ')' : '') + ' — nothing new starts' : 'LIVE — real work on your Claude login'} · heartbeat ${ago(o.heartbeat.last)} · ${o.instance.version} · pid ${o.instance.pid} · up ${ago(o.instance.startedAt).replace(' ago', '')}${o.usage && o.usage.session ? ' · plan session ' + o.usage.session.percent + '%' : ''}`;
+  const btn = $('pause'); btn.disabled = false; btn.textContent = paused ? 'Resume office' : 'Pause office'; btn.className = paused ? 'primary' : 'danger';
+  $('problems').innerHTML = o.problems.length ? o.problems.map(x => `<li><span class="kind ${x.severity}">${esc(x.kind)}</span>${esc(x.text)}</li>`).join('') : '<li class="empty">None right now.</li>';
+  $('dcount').textContent = p.count ? `(${p.count})` : '';
+  $('decisions').innerHTML = p.items.length ? p.items.map(decisionHTML).join('') : '<li class="empty">Nothing is waiting on you.</li>';
+  const c = o.tasks;
+  $('counts').innerHTML = [['running', c.doing + (c.review || 0)], ['backlog', c.next], ['waiting on you', c.waiting], ['blocked', c.blocked], ['unknown outcome', c.unknown], ['failed today', c.failed24h], ['done today', c.done24h], ['nothing to send today', c.noop24h]]
+    .map(([k, v]) => `<div class="stat"><b>${v || 0}</b><span>${k}</span></div>`).join('');
+  $('routines').innerHTML = o.routines.length ? o.routines.map(r => `<li><div class="r-title">${esc(r.title)}</div><div class="muted">${esc(r.agent)} · ${esc(r.desc)} · ${r.paused ? '<b>paused</b>' : 'next ' + until(r.nextAt)} · last ${ago(r.lastAt)}${r.last ? ' — ' + (r.last.error ? '<span class="bad">failed</span>' : r.last.noop ? 'nothing to send' : esc(r.last.state) + (r.last.review ? ' (review ' + esc(r.last.review) + ')' : '')) : ''}${r.needsOk ? ' · waits for your OK' : ' · read-only'}</div></li>`).join('') : '<li class="empty">No routines.</li>';
+  const pl = o.pipeline; $('pipeline').innerHTML = pl.active ? `<span class="ok">Active.</span> ${Object.entries(pl.counts).map(([k, v]) => `${esc(k)} ${v}`).join(' · ') || 'no prospects yet'}` : `<b>Off.</b> Not set: ${esc(pl.missing.join(', '))}. These limits are yours to decide, in <code>${esc(pl.file)}</code>.`;
+  const rs = o.research; $('research').innerHTML = rs.active ? `<span class="ok">Active.</span> ${rs.budget.used} of ${rs.budget.limit} runs this week · ${rs.accepted} accepted · ${rs.published} published · ${rs.blocked} blocked · ${rs.rejected} rejected${rs.gaps.length ? ' · <span class="bad">' + rs.gaps.length + ' gap(s)</span>' : ''}` : `<b>Off.</b> Not set: ${esc(rs.missing.join(', '))}, in <code>${esc(rs.file)}</code>.`;
+  $('fresh').innerHTML = o.freshness.map(f => `<li>${esc(f.note)} — <span class="${f.stale ? 'bad' : 'muted'}">${f.days === null ? 'unknown' : f.days === 0 ? 'today' : f.days + ' days ago'}${f.stale ? ' · check it is still true' : ''}</span></li>`).join('') || '<li class="empty">—</li>';
+  $('ready').innerHTML = o.ready.checks.map(x => `<li><span class="${x.ok ? 'ok' : 'bad'}">${x.ok ? '✓' : '✗'}</span> ${esc(x.name)}${x.detail ? ' — <span class="muted">' + esc(x.detail) + '</span>' : ''}</li>`).join('');
+}
+$('pause').addEventListener('click', async () => {
+  const paused = last && last.paused && last.paused.paused;
+  if (paused) await post('/api/office/resume');
+  else { const why = prompt('Why pause? (optional)') ; if (why === null) return; await post('/api/office/pause', { why }); }
+  refresh();
+});
+$('stop').addEventListener('click', async () => {
+  if (!confirm('Stop the office? Routines stop firing until you run start-office.cmd again. Work in progress is picked up on the next start.')) return;
+  await post('/api/office/stop'); setTimeout(refresh, 1500);
+});
+$('decisions').addEventListener('click', async e => {
+  const b = e.target.closest('button[data-act]'); if (!b) return;
+  const note = b.parentElement.querySelector('[data-note]')?.value || '';
+  b.disabled = true;
+  if (b.dataset.act === 'checked') await post(`/api/tasks/${b.dataset.id}/checked`, { sent: b.dataset.sent === 'true', note });
+  if (b.dataset.act === 'cancel' && confirm('Cancel this task for good?')) await post(`/api/tasks/${b.dataset.id}/cancel`, { why: 'cancelled from the operations page' });
+  if (b.dataset.act === 'answer') { if (!note.trim()) { b.disabled = false; return; } await post(`/api/tasks/${b.dataset.id}/answer`, { text: note }); }
+  if (b.dataset.act === 'mark') await post(`/api/pipeline/${encodeURIComponent(b.dataset.key)}/mark`, { event: b.dataset.event });
+  refresh();
+});
+refresh(); setInterval(refresh, 10000);
+</script>
+</body>
+</html>

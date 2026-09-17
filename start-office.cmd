@@ -2,10 +2,11 @@
 REM Starts the Origin Pixel office and keeps it up.
 REM
 REM The routine scheduler only runs while this process does, and a missed run is only caught up when
-REM the server comes back. To have it start at logon, register it once (checked 17 Sep 2026: NOT
-REM registered on this machine yet):
-REM   schtasks /create /tn OriginPixelOffice /sc onlogon /rl limited /tr "\"%~f0\""
-REM Remove with:  schtasks /delete /tn OriginPixelOffice /f
+REM the server comes back. To have it start at logon (checked 17 Sep 2026: NOT registered yet):
+REM   powershell -ExecutionPolicy Bypass -File scriptsinstall-autostart.ps1              register it
+REM   powershell -ExecutionPolicy Bypass -File scriptsinstall-autostart.ps1 -Check       what is registered
+REM   powershell -ExecutionPolicy Bypass -File scriptsinstall-autostart.ps1 -Uninstall   remove it
+REM Status, pause and the Stop button: http://localhost:4520/ops
 REM
 REM Runs from this file's own folder so the relative brain path in office.config.json resolves.
 setlocal enabledelayedexpansion
@@ -40,6 +41,11 @@ set CODE=!errorlevel!
 for /f %%t in ('powershell -NoProfile -Command "[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()"') do set END=%%t
 set /a RAN=END-START
 echo [%date% %time%] office exited with !CODE! after !RAN! s >> "logs\office.log"
+REM Exit code 3 = stopped on purpose (the Stop button on /ops, or POST /api/office/stop): do not restart.
+if !CODE!==3 (
+  echo [%date% %time%] stopped on purpose - not restarting >> "logs\office.log"
+  exit /b 0
+)
 if !RAN! GEQ 600 set RESTARTS=0
 set /a RESTARTS+=1
 if !RESTARTS! GTR 5 (

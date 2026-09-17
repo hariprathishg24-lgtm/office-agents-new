@@ -50,6 +50,7 @@ import { scrub } from './scrub.mjs';
 import * as coord from './coordinator.mjs';
 import * as acq from './acquisition.mjs';
 import * as research from './research.mjs';
+import * as ops from './ops.mjs';
 
 const cfg = loadConfig();
 const HTML = path.join(ROOT, 'dist', 'command-centre-v2.html'); // built by build.mjs; shipped so npm start works without a build
@@ -63,6 +64,8 @@ const RUN_TIMEOUT = +process.env.AO_TIMEOUT_MS || Math.max(60, +cfg.timeout || 3
 const CLOCK_ON = process.env.AO_CLOCK !== 'off';   // off: routines never fire (npm run check, the tests) — the clock must not run real work against real state
 const USAGE_ON = process.env.AO_USAGE !== 'off';   // off: no call to Claude's usage endpoint
 const HOST = process.env.AO_HOST || cfg.host || '127.0.0.1'; // this machine only: the API has no login, and it can approve outbound sends
+const STARTED = Date.now();
+const CHILDREN = new Set(); // running Claude processes
 const MAX_ATTEMPTS = 3; // a task interrupted by a restart is picked up again at most this many times in total
 { const m = normModel(cfg.model); if (cfg.model && !m) console.warn(`config: model must be sonnet, opus or fable (got "${cfg.model}") — using ${DEFAULT_MODEL}`); cfg.model = m || DEFAULT_MODEL; } // V3.6: three models, by name
 { const e = normEffort(cfg.effort); if (cfg.effort && !e) console.warn(`config: effort must be low, medium, high, xhigh or max (got "${cfg.effort}") — using the model's own`); cfg.effort = e || ''; } // V3.6.1: the office's effort, empty = the model's own
@@ -178,6 +181,7 @@ async function askX(system, user, { maxTokens = 4000, tools = true, timeout = RU
     let p;
     try { p = spawnClaude(claudeBin(cfg), args, { cwd: CLI_CWD, env, stdio: ['pipe', 'pipe', 'pipe'] }); }
     catch (e) { cleanup(); return reject(runError('Could not start Claude: ' + e.message, { phase: 'spawn', toolsAttempted: 0, partial: '' })); }
+    CHILDREN.add(p); p.on('exit', () => CHILDREN.delete(p)); // a clean shutdown ends these instead of leaving them orphaned
     timer = setTimeout(() => {
       try { p.kill('SIGKILL'); } catch {}
       const open = [...attempted.values()].map(toolName);
@@ -574,6 +578,7 @@ async function execute(id, attemptId, { feedback } = {}) {
   // the difference between "nothing went out" and "it may have gone out"
   const onToolUse = at.mode === 'approve' ? () => { if (sendMarked) return; sendMarked = true; patchTask(id, t => { if (t.attempt !== attemptId) return false; t.sendStartedAt = Date.now(); }); } : null;
   try { out = await run(snap, feedback, at.mode, { onToolUse }); } catch (e) { failure = e; }
+  if (stopping) return null; // stopped on purpose: the run was cut off, not failed — the next start recovers it
   // "NOTHING TO SEND" on the first line: the agent looked and there is nothing outbound — a finished
   // report, never an approval request that makes an empty check look like work to send
   const noop = !!(out && at.mode === 'draft' && /^[\s#*_>]*NOTHING TO SEND\b/i.test(out.result));
@@ -599,7 +604,7 @@ async function execute(id, attemptId, { feedback } = {}) {
     }
     else { t.result = out.result; t.state = 'done'; t.doneAt = Date.now(); t.because = 'finished'; made = followUps(list, t, out.result); }
   } else {
-    Object.assign(a, { outcome: 'error', error: failure.message, phase: failure.phase || '' });
+    Object.assign(a, { outcome: 'error', error: failure.message, phase: failure.phase || '', cause: ops.causeOf(failure.message, failure.phase) });
     t.lastError = failure.message;
     if (at.mode === 'approve' && !failure.toolsAttempted && !t.sendStartedAt) {
       a.outcome = 'not-sent'; // the agent never reached a tool, so nothing left this machine; the approval is spent
@@ -937,7 +942,9 @@ const server = http.createServer(async (req, res) => {
       const page = fs.readFileSync(HTML, 'utf8');
       return res.end(url.pathname === '/dark' ? page.replace('<body>', '<body class="dark">') : page); // /dark: the same file, opened in dark mode
     }
-    if (url.pathname === '/api/health') return json(res, 200, { ok: true, version, backend, model: cfg.model, modelName: modelName(cfg.model), models: MODEL_KEYS, effort: cfg.effort || '', efforts: EFFORT_KEYS, name: cfg.name, brain: BRAIN, notes: graph.notes, depts: DEPT_KEYS,
+    if (req.method === 'GET' && url.pathname === '/ops') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }); return res.end(fs.readFileSync(path.join(ROOT, 'ops.html'), 'utf8')); }
+    if (url.pathname === '/api/ops') return json(res, 200, opsSummary());
+    if (url.pathname === '/api/health') return json(res, 200, { ok: true, instance: { pid: process.pid, startedAt: STARTED }, heartbeat: heartbeat.last, ready: readiness().ok, version, backend, model: cfg.model, modelName: modelName(cfg.model), models: MODEL_KEYS, effort: cfg.effort || '', efforts: EFFORT_KEYS, name: cfg.name, brain: BRAIN, notes: graph.notes, depts: DEPT_KEYS,
       agents: agentsOut(), setup: setupMap(), routines: (l => ({ count: l.length, paused: l.filter(r => r.paused).length, depts: routines.ALLOWED }))(loadRoutines()), roster: { customised: roster.customised, briefed: roster.briefed, files: roster.files, problems: roster.problems }, skills: (({ count, shipped, brain, problems }) => ({ count, shipped, brain, problems }))(skills.summary()), tools: backend === 'claude-cli', mcp: mcp.summary(), clock: CLOCK_ON, host: HOST, paused: pausedNow() });
     if (url.pathname === '/api/agents') return json(res, 200, { agents: agentsOut(), problems: roster.problems, files: roster.files });
     if (url.pathname === '/api/skills') return json(res, 200, refreshSkills().summary()); // reloads from disk: edit a skill, hit this, see it
@@ -993,6 +1000,7 @@ const server = http.createServer(async (req, res) => {
     const pm = url.pathname.match(/^\/api\/pipeline\/([^/]+)\/mark$/);
     if (pm && req.method === 'POST') { const b = await body(req); const r = pipelineMark(decodeURIComponent(pm[1]), String(b.event || ''), String(b.note || '').trim().slice(0, 300)); return json(res, r.error ? 400 : 200, r); } // everything waiting on the owner, as decisions
     if (url.pathname === '/api/office/pause' && req.method === 'POST') { const b = await body(req); return json(res, 200, { ok: true, paused: setPaused(true, b.why) }); }
+    if (url.pathname === '/api/office/stop' && req.method === 'POST') { json(res, 200, { ok: true, stopping: true }); setTimeout(() => shutdown('stop requested', STOPPED_ON_PURPOSE), 50); return; }
     if (url.pathname === '/api/office/resume' && req.method === 'POST') { return json(res, 200, { ok: true, paused: setPaused(false) }); }
     const own = url.pathname.match(/^\/api\/tasks\/([^/]+)\/(cancel|reassign|checked|answer|handoff)$/);
     if (own && req.method === 'POST') {
@@ -1059,8 +1067,73 @@ const server = http.createServer(async (req, res) => {
 server.on('error', e => {
   if (e.code === 'EADDRINUSE') console.error(`✗ port ${cfg.port} on ${HOST} is already in use — another office (or another program) has it. Stop that one, or start this one with PORT=<another port>.`);
   else console.error('✗ server:', e.message);
+  ops.releaseLock(DATA);
   process.exit(1);
 });
+
+/* ---------- running continuously (Phase 8, ops.mjs) ---------- */
+// One office per data folder: a second server on the same tasks.json would run the same work twice.
+{
+  const lock = await ops.acquireLock(DATA, { port: cfg.port, host: HOST });
+  if (!lock.ok) { console.error(`✗ another office (pid ${lock.holder.pid}, port ${lock.holder.port}) is already running on ${DATA} — not starting a second one.`); process.exit(1); }
+  if (lock.tookOver) console.log(`  lock: the previous office (pid ${lock.tookOver.pid}) did not shut down cleanly — taking over`);
+}
+// The heartbeat. Timers do not fire while the machine sleeps, so a long gap between beats is a sleep
+// (or the office being off), and it is surfaced rather than silently leaving routines late.
+const heartbeat = { last: null, sleeps: [] };
+{ const prev = office.lastHeartbeat; if (prev && STARTED - prev > 2 * 60 * 1000) heartbeat.sleeps.push({ from: prev, to: STARTED, kind: 'off' }); }
+let lastBeatSaved = 0;
+function beat(now = Date.now()) {
+  if (heartbeat.last && now - heartbeat.last > 90 * 1000) { heartbeat.sleeps.push({ from: heartbeat.last, to: now, kind: 'asleep' }); console.log(`  ☾ the machine was asleep for ${Math.round((now - heartbeat.last) / 60000)} min`); }
+  heartbeat.sleeps = heartbeat.sleeps.slice(-20);
+  heartbeat.last = now;
+  if (now - lastBeatSaved > 5 * 60 * 1000) { lastBeatSaved = now; try { office.lastHeartbeat = now; writeJSON(OFFICE_FILE, office); } catch {} }
+}
+function readiness() {
+  const checks = [];
+  const add = (name, ok, detail = '') => checks.push({ name, ok: !!ok, detail });
+  add('brain folder', fs.existsSync(BRAIN), BRAIN);
+  try { load(); add('task store readable', true); } catch (e) { add('task store readable', false, e.message); }
+  add('Claude available', backend !== 'claude-cli' || !!claudeBin(cfg), backend === 'claude-cli' ? claudeSource(cfg) : 'API');
+  add('routines valid', !rlist.problems.length, rlist.problems.slice(0, 3).join('; '));
+  add('roster valid', !roster.problems.length, roster.problems.slice(0, 3).join('; '));
+  add('clock', CLOCK_ON, CLOCK_ON ? 'on' : 'off (AO_CLOCK=off)');
+  add('this machine only', LOOPBACK, HOST);
+  return { ok: checks.filter(c => !['clock'].includes(c.name)).every(c => c.ok), checks };
+}
+function opsSummary() {
+  const now = Date.now(); let tasks = []; try { tasks = load(); } catch {}
+  const since = now - 864e5, count = f => tasks.filter(f).length;
+  const rl = loadRoutines();
+  let index = null; try { index = vaultIndex(); } catch {}
+  return {
+    at: now, instance: { pid: process.pid, startedAt: STARTED, version, port: cfg.port, data: DATA }, paused: pausedNow(), heartbeat, ready: readiness(),
+    problems: ops.problems({ tasks, sleeps: heartbeat.sleeps, usage: usageCache.value, ceiling: USAGE_CEILING, claudeFound: backend !== 'claude-cli' || !!claudeBin(cfg) }),
+    tasks: { next: count(t => t.state === 'next'), doing: count(t => t.state === 'doing'), review: count(t => t.state === 'review'), waiting: count(t => t.state === 'waiting'), blocked: count(t => t.state === 'blocked'),
+      unknown: count(t => t.needsCheck), failed24h: count(t => t.state === 'done' && t.error && !t.needsCheck && (t.doneAt || 0) > since), done24h: count(t => t.state === 'done' && !t.error && !t.noop && (t.doneAt || 0) > since), noop24h: count(t => t.noop && (t.doneAt || 0) > since) },
+    routines: rl.map(r => { const lt = tasks.filter(t => t.routine === r.id).at(-1); return { id: r.id, title: r.title, agent: agentName(r.agent), desc: r.desc, paused: r.paused, needsOk: r.needsOk, nextAt: r.nextAt, lastAt: r.lastAt,
+      last: lt ? { id: lt.id, state: lt.state, error: !!lt.error, noop: !!lt.noop, review: lt.review?.verdict || null } : null }; }),
+    usage: usageCache.value, pipeline: (({ active, missing, counts, file }) => ({ active, missing, counts, file }))(acq.summary(acq.loadPipeline(DATA), acq.loadConstraints(BRAIN))),
+    research: research.stats(research.loadState(DATA), research.loadConfig(BRAIN)),
+    freshness: index ? ops.freshness(index, CORE_NOTES) : [],
+  };
+}
+// A clean stop (Ctrl+C in the launcher window, or a service stop): no new work, running Claude
+// processes ended, the reason recorded. What was mid-flight is recovered on the next start exactly
+// as after a crash — nothing that may have sent is sent again.
+let stopping = false;
+const STOPPED_ON_PURPOSE = 3; // start-office.cmd does not restart an office that was stopped on purpose
+function shutdown(signal, code = 0) {
+  if (stopping) return; stopping = true;
+  console.log(`■ stopping (${signal}) — ${CHILDREN.size} Claude run${CHILDREN.size === 1 ? '' : 's'} in progress will be picked up on the next start`);
+  try { const running = load().filter(t => RUNNING.includes(t.state)).map(t => t.id); office.lastShutdown = { at: Date.now(), signal, running }; office.lastHeartbeat = Date.now(); writeJSON(OFFICE_FILE, office); } catch {}
+  for (const c of CHILDREN) { try { c.kill(); } catch {} }
+  server.close(); ops.releaseLock(DATA);
+  setTimeout(() => process.exit(code), 300);
+}
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGBREAK', 'SIGHUP']) { try { process.on(sig, () => shutdown(sig)); } catch {} }
+process.on('exit', () => ops.releaseLock(DATA));
+
 server.listen(cfg.port, HOST, () => {
   console.log(`Agents Office ${version} → http://localhost:${cfg.port}${LOOPBACK ? '   (this machine only)' : '   ⚠ listening on ' + HOST + ' — anyone who can reach it can run and approve tasks'}`);
   console.log(`  business: ${cfg.name}   brain: ${BRAIN} (${graph.notes} notes, ${graph.links.length} links)   claude: ${backend}${backend === 'claude-cli' ? ' (' + claudeSource(cfg) + ')' : ''} · ${modelName(cfg.model)}${cfg.effort ? ' · effort ' + cfg.effort : ''} by default (routing on Sonnet)`);
@@ -1068,6 +1141,7 @@ server.listen(cfg.port, HOST, () => {
   if (USAGE_ON) getUsage(true).then(u => console.log(u.source === 'claude' ? `  usage: session ${u.session?.percent ?? '—'}% · week ${u.week?.percent ?? '—'}% (your Claude plan, as Claude Code shows it)` : `  usage: Claude's gauge unavailable (${u.reason}) — showing the office's own count`)).catch(() => {});
   brainGit.ensureRepo(BRAIN);
   console.log(`  tasks: ${FILE}   notes the agents write: ${NOTES_DIR}`);
+  console.log(`  operations: http://localhost:${cfg.port}/ops   (problems, decisions waiting on you, routines, pause, stop)`);
   console.log(`  usage guard: routines hold above ${USAGE_CEILING}% of the session window (usageCeiling in office.config.json)`);
   console.log(`  brain history: ${brainGit.enabled() ? 'on — every agent write is committed to ' + BRAIN + ' (git log to review, git revert to undo)' : 'OFF'}`);
   const rl = loadRoutines(); const nx = rl.filter(r => !r.paused && r.nextAt).sort((a, b) => a.nextAt - b.nextAt)[0];
@@ -1079,6 +1153,7 @@ server.listen(cfg.port, HOST, () => {
   if (!fs.existsSync(research.configFile(BRAIN))) { try { fs.writeFileSync(research.configFile(BRAIN), JSON.stringify(research.template(), null, 2) + String.fromCharCode(10)); console.log('  research: wrote ' + research.configFile(BRAIN) + ' with the budget unset'); } catch {} }
   { const c = research.loadConfig(BRAIN); console.log('  research: ' + (c.active ? 'ACTIVE, ' + c.config.runsPerWeek + ' run(s) a week' : 'off — ' + (c.missing.length ? 'not set: ' + c.missing.join(', ') : '"active" is not true'))); }
   { const c = acq.loadConstraints(BRAIN); console.log(`  acquisition workflow: ${c.active ? 'ACTIVE' : 'off — ' + (c.missing.length ? 'not set: ' + c.missing.join(', ') : '"active" is not true')}`); }
+  beat(); setInterval(beat, 20000); // liveness: the heartbeat runs with or without the clock
   if (CLOCK_ON) { setInterval(tickRoutines, 20000); tickRoutines(); } // the clock: every 20 s; the first tick catches up anything missed while the office was off (once, marked LATE)
   else console.log('  clock: OFF (AO_CLOCK=off) — no routine will fire');
   console.log(`  agents: ${AGENTS.length} (${roster.customised} customised${roster.briefed ? ', ' + roster.briefed + ' briefed' : ''}${roster.files.length ? ' via ' + roster.files.join(' + ') : ''})   tools: ${backend === 'claude-cli' ? 'connected MCP servers' + (cfg.tools?.web === false ? '' : ' + web') : 'none on the API backend'}`);

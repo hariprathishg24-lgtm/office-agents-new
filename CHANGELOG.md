@@ -33,6 +33,14 @@ Phases 0–2 of the reliability handoff, plus the prompt-honesty part of Phase 3
   - Findings are checked by the server, not the model: uncited, undated or role-less findings are rejected, and so are unsupported proposals (no first-party source, no corroboration). Old sources are flagged stale. Anything touching prices, permissions, contracts, payment or commitments is blocked and put to the owner. A failed run is a visible gap.
   - Accepted findings reach only the roles they name, as evidence. A rule reaches a skill only when the owner publishes it; the previous skill text is versioned and one call rolls it back. Stats cover found, rejected (by reason), stale, blocked, published and rolled back.
   - `npm test` gains 8 research checks (62 total).
+- **Running continuously on Windows (Phase 8).** `http://localhost:4520/ops` shows, at desktop and phone width:
+  - problems in plain words: an expired Claude login, a machine that looks offline, usage limits, repeated timeouts, and time the office was asleep or off
+  - every decision waiting on the owner, with buttons: went out / did not go out, cancel, answer, qualify
+  - routines with their next and last run and its outcome, work counts, workflow and research status, how long since each core note changed, and readiness checks
+  - Pause, Resume and **Stop** (exit code 3, which the launcher does not restart)
+  - Server side: one office per data folder (a lock; a dead office's lock is taken over). A heartbeat that detects sleep. A clean stop that ends running Claude processes, records what was cut off and releases the lock; the next start recovers it. Every failure is recorded with its cause.
+  - `scripts/install-autostart.ps1` registers, checks (`-Check`) or removes (`-Uninstall`) a logon Scheduled Task: runs as the owner, restarts on failure, never starts a second copy. It is not registered; that is the owner's call.
+  - `npm test` gains 5 ops checks (67 total), and the browser drill covers `/ops` on desktop and phone, and pause from a phone.
 - A folder named like a note inside `Agents Office/` no longer makes every task fail. Notes record the model that did the work, not the first model the CLI listed.
 
 ## 3.6.1-beta.1 — 9 Sep 2026

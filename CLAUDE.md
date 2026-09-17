@@ -153,6 +153,10 @@ The top bar shows the MCP servers **this machine's Claude Code** is connected to
 
 Agents get only connected servers (plus web when enabled). They never get Bash, file tools or sub-agents. Their standing rule: read freely; send, post, pay, delete or change data outside this machine **only** when the owner's task explicitly asks for that exact action.
 
+## Running the office
+
+`start-office.cmd` starts it and restarts a crash with backoff. `http://localhost:4520/ops` shows problems, decisions waiting on the owner, routines and readiness, with Pause, Resume and Stop. `POST /api/office/stop` stops it on purpose (exit code 3, not restarted). For it to start at logon: `scripts/install-autostart.ps1` (`-Check` to see what is registered). Only run that when the owner asks: it runs routines on their plan while they are logged in.
+
 ## Everything else
 
 - `npm run check` is the loop. Run it after any change to code; fix what is red.

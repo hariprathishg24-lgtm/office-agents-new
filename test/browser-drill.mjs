@@ -1,6 +1,7 @@
 // Gate B drill, fake Claude: the served page, a task that sends, the approval card, one send.
 //   node test/browser-drill.mjs        (needs playwright-core and Chrome; not part of npm test)
 import { chromium } from 'playwright-core';
+import path from 'node:path';
 import { scratch, startOffice, sleep } from './helpers.mjs';
 
 const s = scratch('browser');
@@ -48,6 +49,33 @@ try {
     await office.api('POST', '/api/office/resume');
     await page.waitForFunction(id => window.CC.tasks.tasks.find(x => x.sid === id)?.state === 'done', down.id, { timeout: 30000 }).catch(async e => { const pg = await page.evaluate(([u, d]) => window.CC.tasks.tasks.filter(x => x.sid === u || x.sid === d).map(x => ({ sid: x.sid, state: x.state, err: x.error, res: String(x.result || '').slice(0, 80), running: x.running, ready: x.ready })), [up.id, down.id]); throw new Error(JSON.stringify({ page: pg, server: [await office.task(up.id), await office.task(down.id)].map(t => ({ state: t.state, error: t.error, history: t.history })) })); });
     return `blocked on the page (${label} blocked chip${label === 1 ? '' : 's'}), then ran after its prerequisite`;
+  });
+  await step('the operations page works on a desktop and a phone, and pauses the office', async () => {
+    const out = [];
+    for (const [label, vp] of [['desktop', { width: 1440, height: 900 }], ['phone', { width: 390, height: 844 }]]) {
+      const p = await browser.newPage({ viewport: vp }); p.on('pageerror', e => errs.push('ops: ' + e.message));
+      await p.goto(office.base + '/ops'); await p.waitForFunction(() => /LIVE|PAUSED/.test(document.getElementById('status').textContent), null, { timeout: 15000 });
+      const overflow = await p.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+      if (overflow > 1) throw new Error(`${label}: page scrolls sideways by ${overflow}px`);
+      const tooSmall = await p.evaluate(() => [...document.querySelectorAll('button')].filter(b => b.offsetParent && b.getBoundingClientRect().height < 24).length);
+      if (tooSmall) throw new Error(`${label}: ${tooSmall} buttons under 24px tall`);
+      await p.screenshot({ path: path.join(s.dir, `..`, `ops-${label}.png`), fullPage: true }).catch(() => {});
+      if (label === 'phone') {
+        p.once('dialog', d => d.accept('drill'));
+        await p.click('#pause');
+        await p.waitForFunction(() => /PAUSED/.test(document.getElementById('status').textContent), null, { timeout: 15000 });
+        if (!(await office.api('GET', '/api/health')).body.paused) throw new Error('the button did not pause the office');
+        await p.click('#pause');
+        await p.waitForFunction(() => /LIVE/.test(document.getElementById('status').textContent), null, { timeout: 15000 });
+      }
+      out.push(`${label} ${vp.width}px ok`);
+      await p.close();
+    }
+    const main = await browser.newPage({ viewport: { width: 390, height: 844 } }); main.on('pageerror', e => errs.push('office on a phone: ' + e.message));
+    await main.goto(office.base + '/', { waitUntil: 'domcontentloaded', timeout: 60000 }); await main.waitForTimeout(4000);
+    const mainOverflow = await main.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    await main.close();
+    return out.join(' · ') + ` · pause and resume from a phone · the 3D office at 390px scrolls sideways by ${mainOverflow}px`;
   });
   await step('no page errors', async () => { if (errs.length) throw new Error(errs[0]); });
 } catch { failed = true; }

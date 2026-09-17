@@ -91,11 +91,11 @@ export async function runSeat(id, { fake = false, brainPath, quiet = false } = {
       const done = await api('POST', `/api/tasks/${t.id}/run`); // never approved: a draft stays a draft
       if (providerUnavailable(done)) throw Object.assign(new Error(String(done.result || done.lastError?.message).split('\n')[0]), { externalUnavailable: true });
       const verdict = check(f, done, ladder);
-      results.push({ case: c, task: f.task, state: done.state, error: !!done.error, review: done.review || null, output: done.draft || done.result, ...verdict });
+      results.push({ case: c, task: f.task, state: done.state, costUSD: Math.round((done.attempts || []).reduce((s, x) => s + (Number(x.costUSD) || 0), 0) * 10000) / 10000, error: !!done.error, review: done.review || null, output: done.draft || done.result, ...verdict });
       if (!quiet) console.log(`${verdict.passed ? '✓' : '✗'} ${id} ${c}: ${verdict.checks.filter(x => !x.ok && !x.advisory).map(x => x.name + (x.detail ? ' (' + x.detail + ')' : '')).join('; ') || 'all checks passed'}${verdict.checks.some(x => !x.ok && x.advisory) ? ' · advisory: ' + verdict.checks.filter(x => !x.ok && x.advisory).map(x => x.name).join('; ') : ''}`);
     } finally { office.p.kill(); await office.closed; try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {} }
   }
-  const record = { agent: id, at: new Date().toISOString(), live: !fake, passed: results.every(r => r.passed), results };
+  const record = { agent: id, at: new Date().toISOString(), live: !fake, passed: results.every(r => r.passed), costUSD: Math.round(results.reduce((s, r) => s + (r.costUSD || 0), 0) * 10000) / 10000, results };
   if (!fake) fs.writeFileSync(path.join(dir, `results-${record.at.replace(/[:.]/g, '-')}.json`), JSON.stringify(record, null, 2));
   return record;
 }

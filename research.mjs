@@ -42,7 +42,11 @@ export function template() {
       { id: 'outreach-platform-rules', roles: ['pros', 'folo', 'cmail', 'lexi'], question: 'Changes in the last month to email sender requirements (Gmail, Outlook/Microsoft) and LinkedIn messaging rules that affect cold outreach from a new domain.' },
       { id: 'icp-buying', roles: ['lexi', 'pros', 'piper'], question: 'New first-party data or official reports on how founder-led B2B expertise firms (consultancies, recruitment, IT services, accounting, specialist agencies) buy outsourced lead generation or content services.' },
     ],
-    _note: 'Topics are a starting suggestion tied to the first-client goal; edit freely. roles are agent ids from office.agents.json.' };
+    watch: [
+      { id: 'gmail-sender-guidelines', url: 'https://support.google.com/mail/answer/81126', roles: ['pros', 'folo', 'cmail', 'ilm'], question: 'What changed in the Gmail sender guidelines, and does it change how our first touches and follow-ups must be sent?' },
+    ],
+    watchEveryHours: 24,
+    _note: 'Topics are a starting suggestion tied to the first-client goal; edit freely. roles are agent ids from office.agents.json. watch: pages checked for changes (a fetch and a hash, no Claude call); a real change starts a focused research run inside the weekly budget.' };
 }
 export function loadConfig(brainPath) {
   const file = configFile(brainPath);
@@ -52,7 +56,7 @@ export function loadConfig(brainPath) {
   if (!Array.isArray(config.topics) || !config.topics.length) missing.push('topics');
   return { file, exists: !!c, config, missing, active: config.active === true && !missing.length };
 }
-export const loadState = dataDir => { const s = readJSON(stateFile(dataDir), null) || {}; return { findings: s.findings || [], runs: s.runs || [], published: s.published || [], seen: s.seen || {} }; };
+export const loadState = dataDir => { const s = readJSON(stateFile(dataDir), null) || {}; return { findings: s.findings || [], runs: s.runs || [], published: s.published || [], seen: s.seen || {}, watch: s.watch || {} }; };
 export const saveState = (dataDir, s) => writeJSON(stateFile(dataDir), s);
 
 const isUrl = u => /^https?:\/\/[^\s/]+\.[^\s]+$/i.test(String(u || ''));
@@ -67,11 +71,12 @@ export function budget(state, config, now = Date.now()) {
   return { used, limit, left: Math.max(0, limit - used), weekStart: monday };
 }
 
-export function taskFor(config, state) {
+export function taskFor(config, state, { focus = null } = {}) { // focus: a watched page that changed — research that page only
   const known = [...new Set(state.findings.map(f => f.sourceUrl))].slice(-40);
-  return { agent: AGENT, needsOk: false, title: 'Industry research digest',
+  const topics = focus ? [{ id: focus.id, question: `${focus.question} The page changed on ${new Date(focus.changedAt || Date.now()).toISOString().slice(0, 10)}: read ${focus.url} and report what changed.`, roles: focus.roles }] : config.topics;
+  return { agent: AGENT, needsOk: false, title: focus ? `Research: ${focus.id} changed` : 'Industry research digest',
     text: 'RESEARCH STEP: findings\nResearch these questions for the office. Read and report only — change nothing, contact no one.\n' +
-      config.topics.map(t => `- [${t.id}] ${t.question} (affects: ${(t.roles || []).join(', ')})`).join('\n') + '\n\n' +
+      topics.map(t => `- [${t.id}] ${t.question} (affects: ${(t.roles || []).join(', ')})`).join('\n') + '\n\n' +
       `Report at most ${config.findingsPerRun} findings. Prefer original documentation, official announcements and first-party data. For every finding give the exact page URL, the publisher, the publication date and today's date as retrieval date. Separate what the source says (kind "fact") from your reading of it (kind "interpretation"). ` +
       'If you propose that the office change how it works, the finding needs a first-party source (the platform or body itself) or at least one corroborating URL. Never propose changes to prices, permissions, contracts, payment terms or commitments — note the fact and leave the decision to the owner. Do not invent a citation: if you cannot find a source, report nothing for that question and say so.\n' +
       (known.length ? `Already recorded (do not repeat unless the page changed): ${known.join(' ')}\n` : '') +
@@ -183,6 +188,53 @@ export function rollback(state, { brainPath, skill, why = '', now = Date.now() }
   Object.assign(rec, { status: 'rolled-back', rolledBackAt: now, why });
   const f = state.findings.find(x => x.key === rec.key); if (f) f.status = 'accepted';
   return { rolledBack: rec };
+}
+
+/* ---------- watched pages: event-triggered research ---------- */
+// The page's readable text, without markup, scripts or whitespace noise, so a changed ad slot or a
+// session token does not count as a change. An unchanged hash is the cache: no run, no tokens.
+export function pageText(html) {
+  return String(html || '').replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;|&#160;/g, ' ').replace(/\s+/g, ' ').trim();
+}
+/**
+ * Check every watched page. fetchText(url) → text (throws on failure). Returns the items whose text
+ * changed since the last check; the first check of a page only records it. A failed fetch is a
+ * visible gap on that item, never a silent pass.
+ */
+export async function checkWatch(state, config, fetchText, now = Date.now()) {
+  const changed = [], failed = [];
+  state.watch = state.watch || {};
+  for (const w of Array.isArray(config.watch) ? config.watch : []) {
+    if (!w || !w.id || !isUrl(w.url)) continue;
+    const rec = state.watch[w.id] || (state.watch[w.id] = {});
+    rec.url = w.url; rec.checkedAt = now;
+    let text; try { text = pageText(await fetchText(w.url)); } catch (e) { rec.lastError = String(e.message || e).slice(0, 200); failed.push({ ...w, error: rec.lastError }); continue; }
+    delete rec.lastError;
+    const h = crypto.createHash('sha256').update(text).digest('hex').slice(0, 16);
+    if (rec.hash && rec.hash !== h) { rec.changedAt = now; changed.push({ ...w, changedAt: now }); }
+    rec.hash = h;
+  }
+  return { changed, failed };
+}
+
+/* ---------- did a published rule help? ---------- */
+// Compare each role's fixture results before and after the rule was published. More notes and longer
+// prompts do not prove learning: only the seat's own test cases, run again, can say it improved.
+export function ruleEffect(state, { brainPath, rolesOf }) {
+  const rate = r => r && r.results?.length ? r.results.filter(x => x.passed).length / r.results.length : null;
+  return state.published.filter(p => p.status === 'published').map(p => {
+    const roles = (rolesOf(p.skill) || []).map(id => {
+      const dir = path.join(brainPath, 'Agents Office', 'fixtures', id);
+      let runs = []; try { runs = fs.readdirSync(dir).filter(n => /^results-.*\.json$/.test(n)).map(n => JSON.parse(fs.readFileSync(path.join(dir, n), 'utf8'))).filter(r => r.live !== false).sort((a, b) => Date.parse(a.at) - Date.parse(b.at)); } catch {}
+      const before = runs.filter(r => Date.parse(r.at) < p.at).at(-1), after = runs.find(r => Date.parse(r.at) > p.at);
+      const b = rate(before), a = rate(after);
+      return { role: id, before: b, after: a, verdict: b === null || a === null ? 'not measured' : a < b ? 'regressed' : a > b ? 'improved' : 'same' };
+    });
+    const measured = roles.filter(r => r.verdict !== 'not measured');
+    const verdict = !measured.length ? 'not measured' : measured.some(r => r.verdict === 'regressed') ? 'regressed' : measured.some(r => r.verdict === 'improved') ? 'improved' : 'same';
+    return { skill: p.skill, version: p.version, rule: p.rule, at: p.at, verdict, roles };
+  });
 }
 
 export function stats(state, cfg, now = Date.now()) {

@@ -17,6 +17,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 if (args[0] === 'mcp') { console.log('claude.ai Gmail: https://gmail.example/mcp - ✔ Connected'); console.log('claude.ai Canva: https://canva.example/mcp - ✔ Connected'); process.exit(0); } // Gmail is wired to sales, Canva is not
 
+// FAKE_NOSTDIN: a CLI that dies at once without reading its input — the office's write to stdin breaks
+if (process.env.FAKE_NOSTDIN) { process.stdin.destroy(); process.stderr.write('stdin closed\n'); await sleep(50); process.exit(1); }
+
 const sysAt = args.indexOf('--system-prompt-file');
 const system = sysAt >= 0 ? fs.readFileSync(args[sysAt + 1], 'utf8') : '';
 let input = '';
@@ -76,6 +79,6 @@ process.stdin.on('end', async () => {
     for (const h of user.matchAll(/\[fake:handoff:([a-z0-9]+)\]/g)) extra += `\nHANDOFF → ${h[1]}: enrich the prospect found in "${request.replace(/\[fake:[^\]]*\]/g, '').trim()}"`;
     if (/\[fake:ask\]/.test(user)) extra += '\nNEEDS OWNER: what is the monthly outreach budget?';
   }
-  emit({ type: 'result', subtype: 'success', is_error: false, result: `FAKE ${mode} for: ${request}${extra}`, usage: { input_tokens: 1, output_tokens: 1 } });
+  emit({ type: 'result', subtype: 'success', is_error: false, result: `FAKE ${mode} for: ${request}${extra}`, usage: { input_tokens: 1, output_tokens: 1 }, total_cost_usd: 0.02 });
   process.exit(0);
 });

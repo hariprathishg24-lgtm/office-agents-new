@@ -50,10 +50,33 @@ export function checkContract(text) {
 }
 
 /**
- * agents: the roster · skills: loadSkills() result · lessons: id → count ·
- * usableTools: normalised names of connected + allowed connectors (null when unknown)
+ * How a seat performs on real work, from the task store: how much it finished, how often the owner
+ * had to correct it, how often the reviewer failed its drafts, and what it cost. Cancelled tasks and
+ * "nothing to send" reports are counted apart, so an idle check does not look like output.
  */
-export function coverage({ agents, skills, brainPath, lessons = () => 0, usableTools = null }) {
+export function measure(tasks, agentId) {
+  const mine = (tasks || []).filter(t => t.agent === agentId);
+  const done = mine.filter(t => t.state === 'done' && !t.error && !t.noop).length;
+  const failed = mine.filter(t => t.state === 'done' && t.error).length;
+  const attempts = mine.flatMap(t => t.attempts || []);
+  const costUSD = Math.round(attempts.reduce((s, a) => s + (Number(a.costUSD) || 0), 0) * 10000) / 10000;
+  return {
+    tasks: mine.length, completed: done, failed, nothingToSend: mine.filter(t => t.noop).length, cancelled: mine.filter(t => t.state === 'cancelled').length,
+    waiting: mine.filter(t => t.state === 'waiting').length,
+    completionRate: done + failed ? Math.round(done / (done + failed) * 100) / 100 : null,
+    corrections: attempts.filter(a => a.action === 'revise' || a.action === 'reject').length, // the owner sent the work back
+    reviewerFails: mine.filter(t => t.review && t.review.verdict === 'FAIL').length,           // the independent reviewer found a factual or policy problem
+    unknownOutcomes: mine.filter(t => t.needsCheck).length,
+    costUSD, costPerCompleted: done ? Math.round(costUSD / done * 10000) / 10000 : null,
+    costMeasured: attempts.some(a => typeof a.costUSD === 'number'),
+  };
+}
+
+/**
+ * agents: the roster · skills: loadSkills() result · lessons: id → count ·
+ * usableTools: normalised names of connected + allowed connectors (null when unknown) · tasks: the task store, for the measures
+ */
+export function coverage({ agents, skills, brainPath, lessons = () => 0, usableTools = null, tasks = [] }) {
   const { contracts, fixtures } = dirs(brainPath);
   const roles = agents.map(a => {
     const mine = skills.forAgent(a);
@@ -65,7 +88,7 @@ export function coverage({ agents, skills, brainPath, lessons = () => 0, usableT
     const fx = path.join(fixtures, a.id);
     const cases = FIXTURE_CASES.filter(c => fs.existsSync(path.join(fx, c + '.md')));
     let review = null; try { review = JSON.parse(fs.readFileSync(path.join(fx, 'review.json'), 'utf8')); } catch {}
-    let lastRun = null; try { const runs = fs.readdirSync(fx).filter(n => /^results-.*\.json$/.test(n)).sort(); if (runs.length) { const r = JSON.parse(fs.readFileSync(path.join(fx, runs.at(-1)), 'utf8')); lastRun = { file: runs.at(-1), at: r.at, passed: r.passed, live: r.live }; } } catch {}
+    let lastRun = null; try { const runs = fs.readdirSync(fx).filter(n => /^results-.*\.json$/.test(n)).sort(); if (runs.length) { const r = JSON.parse(fs.readFileSync(path.join(fx, runs.at(-1)), 'utf8')); lastRun = { file: runs.at(-1), at: r.at, passed: r.passed, live: r.live, cases: (r.results || []).length, casesPassed: (r.results || []).filter(x => x.passed).length, costUSD: r.costUSD ?? null }; } } catch {}
     const reviewCurrent = !!(review && review.passed === true && contract.hash && review.contractHash === contract.hash);
     const level = contract.complete && cases.length === FIXTURE_CASES.length && reviewCurrent ? 'tested'
       : contract.complete ? 'contracted'
@@ -81,7 +104,7 @@ export function coverage({ agents, skills, brainPath, lessons = () => 0, usableT
     else if (!review) gaps.push('never reviewed');
     const dead = tools.filter(t => t.usable === false).map(t => t.name); if (dead.length) gaps.push('tools not connected: ' + dead.join(', '));
     return { id: a.id, department: a.department, lead: !!a.lead, name: a.name, role: a.role, level, firstClient: FIRST_CLIENT[a.id] || null,
-      brief: brief.length, skills: { specific, shared }, lessons: lessons(a.id), contract: { exists: contract.exists, complete: contract.complete }, fixtures: cases, lastRun, reviewed: reviewCurrent, tools, gaps };
+      brief: brief.length, skills: { specific, shared }, lessons: lessons(a.id), contract: { exists: contract.exists, complete: contract.complete }, fixtures: cases, lastRun, reviewed: reviewCurrent, tools, gaps, measures: measure(tasks, a.id) };
   });
   const by = LEVELS.map(l => [l, roles.filter(r => r.level === l).length]);
   const first = roles.filter(r => r.firstClient);
@@ -102,7 +125,8 @@ if (process.argv[1] && path.basename(process.argv[1]) === 'coverage.mjs') { // r
   const learn = await import('./learn.mjs');
   const cfg = loadConfig();
   const agents = loadRoster(cfg.brainPath).agents;
-  const c = coverage({ agents, skills: loadSkills(cfg.brainPath, agents), brainPath: cfg.brainPath, lessons: id => learn.count(cfg.brainPath, id) });
+  let tasks = []; try { tasks = JSON.parse(fs.readFileSync(path.join(process.env.AO_DATA || path.join(ROOT, 'data'), 'tasks.json'), 'utf8')); } catch {}
+  const c = coverage({ agents, skills: loadSkills(cfg.brainPath, agents), brainPath: cfg.brainPath, lessons: id => learn.count(cfg.brainPath, id), tasks });
   const out = path.join(process.env.AO_DATA || path.join(ROOT, 'data'), 'coverage.json');
   fs.mkdirSync(path.dirname(out), { recursive: true }); fs.writeFileSync(out, JSON.stringify(c, null, 2));
   console.log(summaryText(c));

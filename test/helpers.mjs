@@ -36,8 +36,10 @@ export async function startOffice({ brain, data, env = {} }) {
   const port = probe.address().port;
   await new Promise(resolve => probe.close(resolve));
   const logFile = path.join(data, '..', `fake-claude-${port}.log`);
-  const childEnv = { ...process.env, PORT: String(port), AO_DATA: data, AO_BRAIN: brain, AO_CLAUDE: FAKE, AO_CLOCK: 'off', AO_USAGE: 'off', AO_TIMEOUT_MS: '3000', FAKE_LOG: logFile, ...env };
-  delete childEnv.ANTHROPIC_API_KEY; delete childEnv.AO_HOST; // always the CLI path, always loopback
+  const childEnv = { ...process.env, PORT: String(port), AO_DATA: data, AO_BRAIN: brain, AO_CLAUDE: FAKE, AO_CLOCK: 'off', AO_USAGE: 'off', AO_TIMEOUT_MS: '3000', AO_REQUIRE_FOR_OUTBOUND: 'none', FAKE_LOG: logFile, ...env }; // readiness limits have their own test
+  if (!env.ANTHROPIC_API_KEY) delete childEnv.ANTHROPIC_API_KEY; // the CLI path unless a test asks for the API
+  delete childEnv.AO_HOST; // always loopback
+  if (env.AO_USAGE_PERCENT === undefined) delete childEnv.AO_USAGE_PERCENT;
   const p = spawn(process.execPath, ['serve.mjs'], { cwd: ROOT, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = ''; p.stdout.on('data', d => { out += d; }); p.stderr.on('data', d => { out += d; });
   const exited = new Promise(r => p.on('exit', r));

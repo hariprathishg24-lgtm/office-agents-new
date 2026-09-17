@@ -14,6 +14,11 @@ export const MAX_HANDOFFS = 3;       // new tasks one result may create
 export const MAX_DEPTH = 3;          // a handoff of a handoff of a handoff, and no further
 export const TERMINAL = ['done', 'cancelled'];
 
+/** What a task has cost so far, across every attempt (USD as the Claude CLI reports it). */
+export const spent = t => Math.round((t.attempts || []).reduce((s, a) => s + (Number(a.costUSD) || 0), 0) * 10000) / 10000;
+/** A budget the task has used up: no further run starts until the owner raises it. */
+export const overBudget = t => !!(t.budget && Number(t.budget.usd) > 0 && spent(t) >= Number(t.budget.usd));
+
 /** Where a task stands against its prerequisites. */
 export function prerequisites(t, byId) {
   const after = Array.isArray(t.after) ? t.after : [];
@@ -105,6 +110,10 @@ export function pending(list, { paused = null, now = Date.now(), agentName = id 
       decision: `"${t.title}" cannot start: ${t.blockedReason.replace(/^blocked:\s*/, '')}.` });
     for (const q of (t.needsOwner || []).filter(q => !q.answered)) out.push({ kind: 'question', id: t.id, agent: t.agent, title: t.title, since: q.at || null,
       decision: `${who(t)} needs from you: ${q.text}` });
+    if (t.deadline && !TERMINAL.includes(t.state) && now > t.deadline) out.push({ kind: 'overdue', id: t.id, agent: t.agent, title: t.title, since: t.deadline,
+      decision: `"${t.title}" was due ${new Date(t.deadline).toISOString().slice(0, 10)} and is still ${t.state}. Move the deadline, reassign it, or cancel it.` });
+    if (overBudget(t) && !TERMINAL.includes(t.state)) out.push({ kind: 'budget-spent', id: t.id, agent: t.agent, title: t.title,
+      decision: `"${t.title}" has used its budget ($${spent(t)} of $${t.budget.usd}). Raise the budget or cancel it — nothing more runs until you decide.` });
     if (t.filed === 'failed') out.push({ kind: 'filing', id: t.id, agent: t.agent, title: t.title,
       decision: `"${t.title}" is done but its note was not saved (${t.noteError}). The work does not need redoing; fix the brain folder.` });
   }
@@ -117,7 +126,7 @@ export function pending(list, { paused = null, now = Date.now(), agentName = id 
     out.push({ kind: ts.length > 1 ? 'repeated-failure' : 'failure', id: t.id, agent: t.agent, title: t.title, since: t.doneAt,
       decision: `${ts.length > 1 ? `"${t.title}" failed ${ts.length} times today` : `"${t.title}" failed`}: ${String(t.result || '').replace(/^Could not complete this task:\s*/, '').split('\n')[0].slice(0, 200)}.${cause}` });
   }
-  const order = ['unknown-outcome', 'approval', 'question', 'repeated-failure', 'blocked', 'failure', 'filing'];
+  const order = ['unknown-outcome', 'approval', 'question', 'budget-spent', 'overdue', 'repeated-failure', 'blocked', 'failure', 'filing'];
   out.sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind) || (a.since || 0) - (b.since || 0));
   return { paused, count: out.length, items: out };
 }

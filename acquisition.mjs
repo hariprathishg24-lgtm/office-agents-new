@@ -26,6 +26,10 @@ export const CONSTRAINTS = {
   maxFollowUps: 'how many follow-ups before a prospect is left alone',
   spendCeiling: 'what may be spent to win the first client (0 means nothing: no paid tools, no ads)',
   deadline: 'by when the first client is wanted (YYYY-MM-DD)',
+  // commercial terms — optional to start the workflow, but a proposal cannot state them until they are set
+  partnerRates: 'what partners charge for partner-delivered work (website, brand, video…), e.g. {"website": "USD 4000 per build"}',
+  partnerMargin: 'the margin added on top of a partner\'s quote (e.g. "25%")',
+  paymentTerms: 'contractual payment terms stated in proposals (e.g. "monthly in advance, net 7")',
 };
 export const REQUIRED = ['outreachPerDayMax', 'followUpDays', 'maxFollowUps', 'spendCeiling'];
 export const ROLES = { research: 'pros', qualify: 'lexi', draft: 'pros', followup: 'folo', proposal: 'piper', delivery: 'dlead' };
@@ -137,7 +141,14 @@ export function plan(pipeline, constraints, openTasks, { now = Date.now() } = {}
 }
 
 /** Prompts for each step. Every one ends in structured output the server checks. */
-export function taskFor(action, pipeline, { exclude = [] } = {}) {
+// The owner's commercial terms as a proposal must state them: set values verbatim, unset ones named as
+// not established, so a proposal never invents a payment term, a partner price or a markup.
+export function termsText(config = {}) {
+  const v = x => x === null || x === undefined || x === '' ? null : typeof x === 'object' ? JSON.stringify(x) : String(x);
+  return [`Payment terms: ${v(config.paymentTerms) ?? 'not established — write "(payment terms to confirm)", never invent them'}.`,
+    `Partner-delivered work: rates ${v(config.partnerRates) ?? 'not established'}; margin ${v(config.partnerMargin) ?? 'not established'}. Without both, partner work is "(price to confirm)" and needs the partner's own quote.`].join('\n');
+}
+export function taskFor(action, pipeline, { exclude = [], config = {} } = {}) {
   const P = key => pipeline.prospects.find(p => p.key === key);
   const card = p => [`KEY: ${p.key}`, `Company: ${p.company}${p.domain ? ' (' + p.domain + ')' : ''}${p.country ? ', ' + p.country : ''}`, `Contact: ${p.contact?.name || 'not found'}${p.contact?.role ? ', ' + p.contact.role : ''}${p.contact?.email ? ' <' + p.contact.email + '>' : ' (no email found)'}`,
     `Source: ${p.source.url} (retrieved ${p.source.retrievedAt})`, 'Evidence:', ...p.fitEvidence.map(e => `- ${e.claim} — ${e.url}`), p.trigger ? `Trigger: ${p.trigger}` : null].filter(Boolean).join('\n');
@@ -159,7 +170,7 @@ export function taskFor(action, pipeline, { exclude = [] } = {}) {
     }
     case 'proposal': { const p = P(action.key);
       return { agent: ROLES.proposal, needsOk: true, title: `Proposal for ${p.company}`,
-        text: `PIPELINE STEP: proposal\nDraft the proposal for ${p.company}, who said they are interested. Follow the proposal skill. Prices only from the offer-ladder note. What they told us: ${action.note || 'not recorded'}.\nThis is a proposal, not an agreement: nothing is agreed until the owner confirms it is signed.\n\n${card(p)}` }; }
+        text: `PIPELINE STEP: proposal\nDraft the proposal for ${p.company}, who said they are interested. Follow the proposal skill. Prices only from the offer-ladder note. What they told us: ${action.note || 'not recorded'}.\nThis is a proposal, not an agreement: nothing is agreed until the owner confirms it is signed.\n${termsText(config)}\n\n${card(p)}` }; }
     case 'delivery': { const p = P(action.key);
       return { agent: ROLES.delivery, needsOk: false, title: `Delivery plan for ${p.company}`,
         text: `PIPELINE STEP: delivery\n${p.company} signed (confirmed by the owner${action.note ? ': ' + action.note : ''}). Plan the start of delivery from the proposal that was sent (task ${p.proposal?.taskId || '?'}) and the services and delivery notes. Say what we need from the client, who does what in week one, and every gap the owner must decide. Contact no one.` }; }

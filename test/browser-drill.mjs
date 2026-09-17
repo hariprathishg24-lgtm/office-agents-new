@@ -71,6 +71,7 @@ try {
       out.push(`${label} ${vp.width}px ok`);
       await p.close();
     }
+    await page.close(); // two software-rendered 3D offices at once starve each other; the desktop one is done
     const main = await browser.newPage({ viewport: { width: 390, height: 844 } }); main.on('pageerror', e => errs.push('office on a phone: ' + e.message));
     await main.goto(office.base + '/', { waitUntil: 'domcontentloaded', timeout: 60000 }); await main.waitForTimeout(4000);
     const mainOverflow = await main.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);

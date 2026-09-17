@@ -114,7 +114,10 @@ const USTATE = usage.loadState(DATA);
 let usageCache = { at: 0, value: null, stale: true };
 async function getUsage(force) {
   if (!force && !usageCache.stale && usageCache.value && Date.now() - usageCache.at < 60000) return usageCache.value;
-  const u = USAGE_ON ? await usage.fetchUsage() : { ok: false, reason: 'usage checks are off (AO_USAGE=off)' };
+  // AO_USAGE_PERCENT: a fixed session percent, for the tests of the usage hold (never set it in the office)
+  const pinned = process.env.AO_USAGE_PERCENT !== undefined && process.env.AO_USAGE_PERCENT !== '' ? Number(process.env.AO_USAGE_PERCENT) : null;
+  const u = Number.isFinite(pinned) ? { ok: true, source: 'test', session: { percent: pinned } }
+    : USAGE_ON ? await usage.fetchUsage() : { ok: false, reason: 'usage checks are off (AO_USAGE=off)' };
   const v = u.ok ? { ...u, office: usage.fallback(USTATE).window } : { ...usage.fallback(USTATE), reason: u.reason };
   usageCache = { at: Date.now(), value: v, stale: false };
   return v;
@@ -180,7 +183,7 @@ async function askX(system, user, { dept = null, maxTokens = 4000, tools = true,
     // the same way put "tools: Notion" in a note's frontmatter for a call that was blocked — the
     // audit trail could not tell "read the owner's Notion" from "was refused". So attempts are
     // held by id and only counted once a tool_result comes back that is not an error.
-    let out = '', err = '', text = '', used = [], gotResult = false, isError = false, errorKind = '', usageOut = null, modelUsed = null, toolsAttempted = 0, said = '';
+    let out = '', err = '', text = '', used = [], gotResult = false, isError = false, errorKind = '', usageOut = null, modelUsed = null, toolsAttempted = 0, said = '', costOut = null;
     const attempted = new Map(); // tool_use id → name, until its result says whether it worked
     const blocked = [];
     // what the agent was last seen doing — a timeout that says "calling Apollo, 240 s before the
@@ -219,7 +222,7 @@ async function askX(system, user, { dept = null, maxTokens = 4000, tools = true,
         if (b.is_error) { if (!blocked.includes(name)) blocked.push(name); continue; }
         if (!used.includes(name)) used.push(name);
       }
-      if (j.type === 'result') { gotResult = true; text = String(j.result || '').trim(); isError = !!j.is_error; errorKind = j.subtype || ''; usageOut = j.usage || null; modelUsed = Object.entries(j.modelUsage || {}).sort((x, y) => ((y[1] && (y[1].costUSD || y[1].outputTokens)) || 0) - ((x[1] && (x[1].costUSD || x[1].outputTokens)) || 0))[0]?.[0] || null; /* the model that did the work, not the first listed (the CLI also lists the small model it uses for housekeeping) */ }
+      if (j.type === 'result') { gotResult = true; text = String(j.result || '').trim(); isError = !!j.is_error; errorKind = j.subtype || ''; usageOut = j.usage || null; costOut = typeof j.total_cost_usd === 'number' ? j.total_cost_usd : null; modelUsed = Object.entries(j.modelUsage || {}).sort((x, y) => ((y[1] && (y[1].costUSD || y[1].outputTokens)) || 0) - ((x[1] && (x[1].costUSD || x[1].outputTokens)) || 0))[0]?.[0] || null; /* the model that did the work, not the first listed (the CLI also lists the small model it uses for housekeeping) */ }
     };
     p.stdout.on('data', d => { out += d; let i; while ((i = out.indexOf('\n')) >= 0) { feed(out.slice(0, i)); out = out.slice(i + 1); } });
     p.stderr.on('data', d => { err += d; });
@@ -229,12 +232,12 @@ async function askX(system, user, { dept = null, maxTokens = 4000, tools = true,
       bumpUsage(usageOut);
       if (blocked.length) console.warn(`  ⚠ refused tool call${blocked.length > 1 ? 's' : ''}: ${mcp.namesOf(blocked).join(', ') || blocked.join(', ')}`);
       const partial = text || said.trim(); // what the agent had written: kept for the owner to see, never delivered as the result
-      const fields = { toolsAttempted, partial, blocked, exitCode: code };
+      const fields = { toolsAttempted, partial, blocked, exitCode: code, cost: costOut }; // a failed run still cost something
       // A result flagged is_error is an error even when it carries text — that text is usually the error.
       if (gotResult && isError) return fail(runError(`Claude reported an error${errorKind && errorKind !== 'success' ? ` (${errorKind})` : ''}: ${(text || err.trim() || 'no detail').slice(0, 300)}`, { ...fields, phase: 'result' }));
       if (code !== 0) return fail(runError(`claude exited ${code}${err.trim() ? ': ' + err.trim().slice(0, 300) : ''}${partial ? ' (its partial output is kept, not delivered)' : ''}`, { ...fields, phase: 'exit' }));
       if (!gotResult) return fail(runError(`Claude ended without a result${err.trim() ? ': ' + err.trim().slice(0, 300) : ''}`, { ...fields, phase: 'empty' }));
-      done({ text, tools: used, blocked, usage: usageOut, modelId: modelUsed });
+      done({ text, tools: used, blocked, usage: usageOut, modelId: modelUsed, cost: costOut });
     });
   });
 }
@@ -382,10 +385,11 @@ async function run(task, feedback, mode, { onToolUse } = {}) {
     (feedback && mode !== 'approve' ? `\n\nThe owner reviewed your previous version and asked for changes: "${feedback}"\nPrevious version:\n${task.result}` : '');
   const pick = modelFor({ task: task.model, routine: task.routineModel, agent: a.model, office: cfg.model }); // four places, one precedence
   const eff = effortFor({ task: task.effort, routine: task.routineEffort, agent: a.effort, office: cfg.effort, model: pick.model }); // same places, then the model's own
-  const { text, tools, blocked, modelId: ran } = await askX(system, user, { dept: a.department, model: pick.model, effort: eff.effort, onToolUse });
+  const { text, tools, blocked, modelId: ran, cost, usage: used } = await askX(system, user, { dept: a.department, model: pick.model, effort: eff.effort, onToolUse });
+  const tokens = used ? (used.input_tokens || 0) + (used.output_tokens || 0) + (used.cache_creation_input_tokens || 0) + (used.cache_read_input_tokens || 0) : null;
   if (!text) throw Object.assign(new Error('Claude returned nothing'), { phase: 'empty', toolsAttempted: tools.length + blocked.length });
   const sources = [...sourcesOf(index, CORE_NOTES, 'core'), ...sourcesOf(index, read, 'relevant')];
-  return { result: text, read, sources, tools: toolKeys(tools), used: mcp.namesOf(tools), blocked: mcp.namesOf(blocked).length ? mcp.namesOf(blocked) : blocked, skills: skills.names(a), modelUsed: pick.model, modelFrom: pick.from, modelId: ran, effortUsed: eff.effort || '', effortFrom: eff.from };
+  return { result: text, read, sources, costUSD: cost ?? null, tokens, tools: toolKeys(tools), used: mcp.namesOf(tools), blocked: mcp.namesOf(blocked).length ? mcp.namesOf(blocked) : blocked, skills: skills.names(a), modelUsed: pick.model, modelFrom: pick.from, modelId: ran, effortUsed: eff.effort || '', effortFrom: eff.from };
 }
 function writeNote(task) { // the deliverable becomes a note in the brain, linked to what was read
   fs.mkdirSync(NOTES_DIR, { recursive: true });
@@ -502,7 +506,18 @@ const RUNNING = ['doing', 'review'];
 const OFFICE_FILE = path.join(DATA, 'office.json');
 let office = (() => { try { return readJSON(OFFICE_FILE, {}); } catch { return {}; } })();
 const pausedNow = () => office.paused ? { paused: true, at: office.pausedAt, why: office.pausedWhy || '' } : null;
-function claim(id, action, { waitingAt } = {}) {
+// Unproven seats are limited, not just labelled: outbound work (a send, a post, a payment) from a seat
+// below the required readiness level cannot be approved without the owner's explicit override, which
+// is recorded on the approval. Drafting is never limited. office.config.json → readiness.requireForOutbound:
+// none · briefed · contracted (default) · tested.
+const READINESS_ORDER = ['generic', 'briefed', 'contracted', 'tested'];
+const REQUIRED_FOR_OUTBOUND = (() => { const v = String(process.env.AO_REQUIRE_FOR_OUTBOUND || cfg.readiness?.requireForOutbound || 'contracted').toLowerCase(); return v === 'none' || READINESS_ORDER.includes(v) ? v : 'contracted'; })();
+function seatLevel(agentId) {
+  const a = AGENTS.find(x => x.id === agentId); if (!a) return 'generic';
+  try { return coverageMod.coverage({ agents: [a], skills, brainPath: BRAIN }).list[0].level; } catch { return 'generic'; }
+}
+const seatLimited = agentId => REQUIRED_FOR_OUTBOUND !== 'none' && READINESS_ORDER.indexOf(seatLevel(agentId)) < READINESS_ORDER.indexOf(REQUIRED_FOR_OUTBOUND);
+function claim(id, action, { waitingAt, override } = {}) {
   if (office.paused) return { status: 423, error: `the office is paused${office.pausedWhy ? ' (' + office.pausedWhy + ')' : ''} — resume it to start or approve work` };
   const list = load(); const t = list.find(x => x.id === id);
   if (!t) return { status: 404, error: 'no such task' };
@@ -515,12 +530,16 @@ function claim(id, action, { waitingAt } = {}) {
   }
   if (action === 'revise' && t.needsCheck) return { status: 409, error: 'the last send has an unknown outcome — check whether it went out before changing this task', task: t };
   if (action === 'revise' && t.error) return { status: 409, error: 'this task failed — there is no result to revise', task: t };
+  if (['run', 'revise', 'reject'].includes(action) && coord.overBudget(t)) return { status: 409, error: `this task has used its budget ($${coord.spent(t)} of $${t.budget.usd}) — raise it (POST /api/tasks/${t.id}/plan) or cancel the task`, task: t }; // approving an existing draft stays the owner's call
   if (action === 'approve') {
     if (waitingAt !== undefined && waitingAt !== null && +waitingAt !== t.waitingAt) return { status: 409, error: 'the draft changed since you opened it — read the new one before approving', task: t };
+    if (seatLimited(t.agent) && !(override && override.approvedBy === 'owner' && String(override.reason || '').trim())) {
+      return { status: 409, error: `${agentName(t.agent)} is "${seatLevel(t.agent)}": outbound work is limited to seats that are at least "${REQUIRED_FOR_OUTBOUND}". Nothing was sent. To send anyway, approve with {"override": {"approvedBy": "owner", "reason": "…"}}.`, task: t, limited: true };
+    }
     if (!t.draft || hash(t.draft) !== t.draftHash) return { status: 409, error: 'the draft was edited after it was written — send it back for rework rather than approving an unchecked text', task: t };
   }
   const at = { id: nid(), action, mode: action === 'approve' ? 'approve' : modeFor(t), startedAt: Date.now() };
-  if (action === 'approve') { t.approval = { draft: t.draft, draftHash: t.draftHash, recipient: ((t.draft.match(/^[\s>*]*TO:\s*(.+)$/im) || [])[1] || '').trim() || null, approvedAt: at.startedAt, attempt: at.id, scope: 'send this draft once, as written', review: t.review ? { agent: t.review.agent, verdict: t.review.verdict } : null }; delete t.sendStartedAt; }
+  if (action === 'approve') { t.approval = { draft: t.draft, draftHash: t.draftHash, recipient: ((t.draft.match(/^[\s>*]*TO:\s*(.+)$/im) || [])[1] || '').trim() || null, approvedAt: at.startedAt, attempt: at.id, scope: 'send this draft once, as written', review: t.review ? { agent: t.review.agent, verdict: t.review.verdict } : null, seatLevel: seatLevel(t.agent), ...(seatLimited(t.agent) ? { override: { approvedBy: 'owner', reason: String(override.reason).trim().slice(0, 300), required: REQUIRED_FOR_OUTBOUND } } : {}) }; delete t.sendStartedAt; }
   t.attempts = [...(t.attempts || []), at]; t.attempt = at.id;
   t.state = 'doing'; t.startedAt = at.startedAt; delete t.ask; t.because = `${action} (attempt ${at.id})`;
   save(list);
@@ -605,6 +624,7 @@ async function execute(id, attemptId, { feedback } = {}) {
   let made = [];
   if (out) {
     a.outcome = 'ok';
+    Object.assign(a, { costUSD: out.costUSD, tokens: out.tokens }); // what this attempt cost, for budgets and the per-role measures
     Object.assign(t, { read: out.read, sources: out.sources, tools: [...new Set([...(t.tools || []), ...out.tools])], used: [...new Set([...(t.used || []), ...out.used])], blocked: out.blocked, skills: out.skills, error: false, modelUsed: out.modelUsed, modelFrom: out.modelFrom, modelId: out.modelId, effortUsed: out.effortUsed, effortFrom: out.effortFrom });
     delete t.lastError;
     if (at.mode === 'approve') { t.result = t.approval.draft + '\n\n---\nAFTER YOUR OK\n' + out.result; t.approved = true; t.approvedAt = t.approval.approvedAt; t.state = 'done'; t.doneAt = Date.now(); t.because = 'sent after the owner approved'; made = followUps(list, t, t.approval.draft); }
@@ -618,7 +638,7 @@ async function execute(id, attemptId, { feedback } = {}) {
     }
     else { t.result = out.result; t.state = 'done'; t.doneAt = Date.now(); t.because = 'finished'; made = followUps(list, t, out.result); }
   } else {
-    Object.assign(a, { outcome: 'error', error: failure.message, phase: failure.phase || '', cause: ops.causeOf(failure.message, failure.phase) });
+    Object.assign(a, { outcome: 'error', error: failure.message, phase: failure.phase || '', cause: ops.causeOf(failure.message, failure.phase), costUSD: failure.cost ?? null });
     t.lastError = failure.message;
     if (at.mode === 'approve' && !failure.toolsAttempted && !t.sendStartedAt) {
       a.outcome = 'not-sent'; // the agent never reached a tool, so nothing left this machine; the approval is spent
@@ -659,6 +679,14 @@ async function execute(id, attemptId, { feedback } = {}) {
 }
 
 /* ---------- the owner's controls over tasks (Phase 7) ---------- */
+// A deadline (a date or a timestamp) and a budget in USD, as the owner sets them. Invalid values are
+// refused rather than guessed; absent means none.
+function planFields(b) {
+  const out = {}, problems = [];
+  if (b.deadline !== undefined && b.deadline !== null && b.deadline !== '') { const at = typeof b.deadline === 'number' ? b.deadline : Date.parse(b.deadline); if (Number.isFinite(at)) out.deadline = at; else problems.push('deadline is not a date'); }
+  if (b.budget !== undefined && b.budget !== null) { const usd = Number(b.budget?.usd ?? b.budget); if (Number.isFinite(usd) && usd > 0) out.budget = { usd }; else problems.push('budget must be a positive number of USD'); }
+  return { fields: out, problems };
+}
 function newTask({ dept, agent, title, text, needsOk, after = [], goal, by = 'you', plan = [], why = '', model, effort, pipeline, extra = {} }) {
   const list = load();
   const known = after.filter(id => list.some(t => t.id === id));
@@ -687,6 +715,11 @@ function ownerAction(id, verb, b) {
     t.reconciled = { sent: b.sent, note, at: Date.now() }; t.needsCheck = false;
     if (b.sent) Object.assign(t, { error: false, approved: true, because: 'owner confirmed it went out' + (note ? ': ' + note : '') });
     else { Object.assign(t, { state: 'waiting', error: false, waitingAt: Date.now(), result: t.draft, because: 'owner confirmed it did not go out', ask: `"${t.title}" did not go out (you checked). Approve again to send it, or reject to change it.` }); delete t.approval; }
+  } else if (verb === 'plan') { // the owner sets or moves a deadline, or sets or raises a budget
+    const p = planFields(b); if (p.problems.length) return { status: 400, error: p.problems.join('; ') };
+    if (!Object.keys(p.fields).length) return { status: 400, error: 'send a deadline and/or a budget' };
+    t.history = [...(t.history || []), { at: Date.now(), from: t.state, to: t.state, why: `plan changed by the owner: ${p.fields.deadline ? 'deadline ' + new Date(p.fields.deadline).toISOString().slice(0, 10) : ''}${p.fields.deadline && p.fields.budget ? ', ' : ''}${p.fields.budget ? 'budget $' + p.fields.budget.usd : ''}${note ? ' — ' + note : ''}` }];
+    Object.assign(t, p.fields);
   } else if (verb === 'answer') { // an agent's NEEDS OWNER question, answered: the agent picks the work up again with the answer
     const q = (t.needsOwner || []).filter(x => !x.answered)[+b.index || 0];
     const answer = String(b.text || '').trim();
@@ -729,7 +762,7 @@ function pipelineAdvance() {
   const { actions, noop } = acq.plan(pipe, constraints, open);
   const created = [];
   for (const a of actions) {
-    const spec = acq.taskFor(a, pipe, { exclude: pipe.prospects.map(p => p.key) });
+    const spec = acq.taskFor(a, pipe, { exclude: pipe.prospects.map(p => p.key), config: constraints.config });
     const agent = AGENTS.find(x => x.id === spec.agent);
     if (!agent) { console.warn(`  ✗ pipeline: no agent ${spec.agent} on the roster for ${a.step}`); continue; }
     const t = newTask({ dept: agent.department, agent: agent.id, title: spec.title, text: spec.text, needsOk: spec.needsOk, by: 'pipeline', goal: 'first-client', why: `acquisition workflow: ${a.step}`,
@@ -749,7 +782,7 @@ function pipelineMark(key, event, note) {
   console.log(`  ◇ pipeline ${key}: ${event}${note ? ' — ' + note : ''}`);
   let task = null;
   if (r.action) { // interested → a proposal draft; signed → a delivery plan
-    const spec = acq.taskFor(r.action, pipe); const agent = AGENTS.find(x => x.id === spec.agent);
+    const spec = acq.taskFor(r.action, pipe, { config: acq.loadConstraints(BRAIN).config }); const agent = AGENTS.find(x => x.id === spec.agent);
     if (agent && !office.paused) task = newTask({ dept: agent.department, agent: agent.id, title: spec.title, text: spec.text, needsOk: spec.needsOk, by: 'pipeline', goal: 'first-client', why: `acquisition workflow: ${r.action.step}`, pipeline: { step: r.action.step, key } });
   }
   return { prospect: r.prospect, task };
@@ -762,7 +795,7 @@ function researchSync() {
   for (const t of tasks.filter(t => t.research)) { const r = research.recordTask(st, t, { config: cfg2.config, agentIds: ids }); if (r) { changed = true; console.log(`  ◇ research ${t.id}: ${r.outcome === 'gap' ? 'GAP — ' + r.gap : r.outcome === 'ok' ? `${r.accepted} accepted, ${r.stale} stale, ${r.blocked} blocked, ${r.rejected.length} rejected, ${r.duplicates} duplicate` : r.outcome}`); } }
   if (changed) research.saveState(DATA, st);
 }
-function researchRun({ by = 'you' } = {}) {
+function researchRun({ by = 'you', focus = null } = {}) {
   const c = research.loadConfig(BRAIN);
   if (c.missing.length) return { status: 409, error: `research is not configured: ${c.missing.join(', ')} not set in ${c.file}. Budget and topics are the owner's to set.` };
   if (office.paused) return { status: 423, error: 'the office is paused' };
@@ -770,24 +803,46 @@ function researchRun({ by = 'you' } = {}) {
   const b = research.budget(st, c.config);
   if (b.left <= 0) return { status: 429, error: `this week's research budget is spent (${b.used} of ${b.limit} runs) — it resets on Monday` };
   if (load().some(t => t.research && !coord.TERMINAL.includes(t.state))) return { status: 409, error: 'a research run is already open' };
-  const spec = research.taskFor(c.config, st); const agent = AGENTS.find(x => x.id === spec.agent);
+  const spec = research.taskFor(c.config, st, { focus }); const agent = AGENTS.find(x => x.id === spec.agent);
   if (!agent) return { status: 500, error: `no ${spec.agent} agent on the roster` };
-  const t = newTask({ dept: agent.department, agent: agent.id, title: spec.title, text: spec.text, needsOk: false, by: by === 'you' ? 'research' : 'research', why: by === 'clock' ? 'the weekly research run' : 'research run started by the owner', extra: { research: true } });
-  st.runs.push({ taskId: t.id, startedAt: t.addedAt, by }); research.saveState(DATA, st);
-  console.log(`  ◆ research run ${t.id} (${b.used + 1} of ${b.limit} this week)`);
+  const why = by === 'clock' ? 'the weekly research run' : by === 'watch' ? `a watched page changed: ${focus?.url}` : 'research run started by the owner';
+  const t = newTask({ dept: agent.department, agent: agent.id, title: spec.title, text: spec.text, needsOk: false, by: 'research', why, extra: { research: true, ...(focus ? { researchFocus: focus.id } : {}) } });
+  st.runs.push({ taskId: t.id, startedAt: t.addedAt, by, ...(focus ? { focus: focus.id } : {}) }); research.saveState(DATA, st);
+  console.log(`  ◆ research run ${t.id}${focus ? ' (' + focus.id + ' changed)' : ''} (${b.used + 1} of ${b.limit} this week)`);
   return { task: t, budget: { ...b, used: b.used + 1, left: b.left - 1 } };
 }
-let lastResearchCheck = 0;
-function researchClock(now = Date.now()) { // weekly, on the owner's day and time, inside the owner's budget
+// Watched pages: fetch, strip to text, hash. A changed page starts one focused run inside the budget;
+// a change the budget cannot cover, and a page that cannot be fetched, are shown to the owner.
+async function researchWatch({ manual = false } = {}) {
+  const c = research.loadConfig(BRAIN);
+  if (!manual && !c.active) return { skipped: 'research is not active' };
+  let st; try { st = research.loadState(DATA); } catch (e) { return { error: e.message }; }
+  const fetchText = async url => { const r = await fetch(url, { signal: AbortSignal.timeout(20000), headers: { 'user-agent': 'AgentsOffice-watch/1 (+local)' } }); if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.text(); };
+  const { changed, failed } = await research.checkWatch(st, c.config, fetchText);
+  const runs = [];
+  for (const w of changed) {
+    const r = researchRun({ by: 'watch', focus: w });
+    const fresh = research.loadState(DATA); fresh.watch = { ...fresh.watch, ...st.watch };
+    if (r.error) { fresh.watch[w.id].pendingChange = { at: w.changedAt, why: r.error }; console.log(`  ◇ watched page ${w.id} changed, no run: ${r.error}`); }
+    else { delete fresh.watch[w.id].pendingChange; runs.push(r.task.id); }
+    research.saveState(DATA, fresh); st = fresh;
+  }
+  if (!changed.length) research.saveState(DATA, { ...research.loadState(DATA), watch: st.watch });
+  return { checked: (c.config.watch || []).length, changed: changed.map(w => w.id), failed: failed.map(w => ({ id: w.id, error: w.error })), runs };
+}
+let lastResearchCheck = 0, lastWatchCheck = 0;
+function researchClock(now = Date.now()) { // weekly, on the owner's day and time, inside the owner's budget; watched pages every watchEveryHours
   if (now - lastResearchCheck < 5 * 60 * 1000) return; lastResearchCheck = now;
   const c = research.loadConfig(BRAIN); if (!c.active) return;
+  if (now - lastWatchCheck > (Number(c.config.watchEveryHours) || 24) * 3600e3) { lastWatchCheck = now; researchWatch().catch(e => console.warn('  research watch:', e.message)); }
   const d = new Date(now), [hh, mm] = String(c.config.at || '08:00').split(':').map(Number);
   if (d.getDay() !== Number(c.config.day ?? 1) || d.getHours() * 60 + d.getMinutes() < hh * 60 + (mm || 0)) return;
   let st; try { st = research.loadState(DATA); } catch { return; }
   const today = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-  if (st.runs.some(r => r.startedAt >= today)) return;
+  if (st.runs.some(r => r.startedAt >= today && r.by !== 'watch')) return;
   const r = researchRun({ by: 'clock' }); if (r.error) console.log(`  ◇ research not run: ${r.error}`);
 }
+const skillRoles = name => { const s = skills.summary().skills.find(x => x.name === name); if (!s) return []; return AGENTS.filter(a => s.everyone || s.agents.includes(a.id) || s.departments.includes(a.department)).map(a => a.id); };
 function lessonDecisions() { // corrections waiting to become rules, and rules due a second look
   const items = [];
   for (const a of AGENTS) {
@@ -801,6 +856,14 @@ function lessonDecisions() { // corrections waiting to become rules, and rules d
 function researchDecisions() {
   const items = []; let st; try { st = research.loadState(DATA); } catch { return items; }
   for (const r of st.runs.filter(r => r.outcome === 'gap' && Date.now() - (r.endedAt || 0) < 7 * 864e5)) items.push({ kind: 'research-gap', id: r.taskId, decision: 'The research run left a gap: ' + r.gap + '.' });
+  for (const [id, w] of Object.entries(st.watch || {})) {
+    if (w.lastError) items.push({ kind: 'research-gap', key: id, decision: `The watched page "${id}" (${w.url}) could not be checked: ${w.lastError}. Changes to it are not being seen.` });
+    if (w.pendingChange) items.push({ kind: 'research-watch', key: id, decision: `The watched page "${id}" changed on ${new Date(w.pendingChange.at).toISOString().slice(0, 10)} but was not researched: ${w.pendingChange.why}.` });
+  }
+  try { for (const e of research.ruleEffect(st, { brainPath: BRAIN, rolesOf: skillRoles })) {
+    if (e.verdict === 'regressed') items.push({ kind: 'rule-regressed', key: e.skill, decision: `The research rule published to "${e.skill}" (v${e.version}) made its seats' test results worse (${e.roles.filter(r => r.verdict === 'regressed').map(r => `${r.role} ${Math.round(r.before * 100)}% → ${Math.round(r.after * 100)}%`).join(', ')}). Roll it back: POST /api/research/rollback {"skill": "${e.skill}"}.` });
+    else if (e.verdict === 'not measured' && Date.now() - e.at > 864e5) items.push({ kind: 'rule-unmeasured', key: e.skill, decision: `The research rule published to "${e.skill}" has not been measured: run the fixtures for ${e.roles.map(r => r.role).slice(0, 5).join(', ') || 'its seats'} (node fixtures.mjs <id>) to see whether it helped.` });
+  } } catch {}
   for (const x of st.findings.filter(x => x.status === 'blocked')) items.push({ kind: 'research-blocked', key: x.key, decision: 'Research found something that would change a price, permission, contract or commitment: "' + x.claim.slice(0, 160) + '" (' + x.publisher + ', ' + x.sourceUrl + '). Proposed: ' + x.proposedAction + '. That is your decision; research cannot make it.' });
   return items;
 }
@@ -974,7 +1037,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/ops') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }); return res.end(fs.readFileSync(path.join(ROOT, 'ops.html'), 'utf8')); }
     if (url.pathname === '/api/ops') return json(res, 200, opsSummary());
     if (url.pathname === '/api/health') return json(res, 200, { ok: true, instance: { pid: process.pid, startedAt: STARTED }, heartbeat: heartbeat.last, ready: readiness().ok, version, backend, model: cfg.model, modelName: modelName(cfg.model), models: MODEL_KEYS, effort: cfg.effort || '', efforts: EFFORT_KEYS, name: cfg.name, brain: BRAIN, notes: graph.notes, depts: DEPT_KEYS,
-      agents: agentsOut(), setup: setupMap(), routines: (l => ({ count: l.length, paused: l.filter(r => r.paused).length, depts: routines.ALLOWED }))(loadRoutines()), roster: { customised: roster.customised, briefed: roster.briefed, files: roster.files, problems: roster.problems }, skills: (({ count, shipped, brain, problems }) => ({ count, shipped, brain, problems }))(skills.summary()), tools: backend === 'claude-cli', mcp: mcp.summary(), clock: CLOCK_ON, host: HOST, paused: pausedNow() });
+      agents: agentsOut(), setup: setupMap(), routines: (l => ({ count: l.length, paused: l.filter(r => r.paused).length, depts: routines.ALLOWED }))(loadRoutines()), roster: { customised: roster.customised, briefed: roster.briefed, files: roster.files, problems: roster.problems }, skills: (({ count, shipped, brain, problems }) => ({ count, shipped, brain, problems }))(skills.summary()), tools: backend === 'claude-cli', mcp: mcp.summary(), clock: CLOCK_ON, host: HOST, paused: pausedNow(), readiness: { requireForOutbound: REQUIRED_FOR_OUTBOUND } });
     if (url.pathname === '/api/agents') return json(res, 200, { agents: agentsOut(), problems: roster.problems, files: roster.files });
     if (url.pathname === '/api/skills') return json(res, 200, refreshSkills().summary()); // reloads from disk: edit a skill, hit this, see it
     const lm = url.pathname.match(/^\/api\/lessons\/([a-z0-9_-]+)\/(confirm|dismiss)$/);
@@ -1012,26 +1075,30 @@ const server = http.createServer(async (req, res) => {
       editRoutine(r.id, patch); return json(res, 200, { ok: true, routines: loadRoutines() });
     }
     if (url.pathname === '/api/tasks' && req.method === 'POST') {
-      const { dept, text, model, effort, after, goal, agent: named, needsOk: saysOk } = await body(req);
+      const { dept, text, model, effort, after, goal, agent: named, needsOk: saysOk, deadline, budget } = await body(req);
       if (!DEPTS[dept] || dept === 'brain') return json(res, 400, { error: 'unknown department' });
+      const plan = planFields({ deadline, budget }); if (plan.problems.length) return json(res, 400, { error: plan.problems.join('; ') });
       if (!text || !String(text).trim()) return json(res, 400, { error: 'empty task' });
       const direct = named && AGENTS.find(a => a.id === named && a.department === dept); // given to a named agent: no routing call
       if (named && !direct) return json(res, 400, { error: `${named} is not an agent in ${dept}` });
       const r = direct ? { agent: direct.id, title: String(text).trim().split(/(?<=[.!?])\s|\n/)[0].slice(0, 90), plan: [], eta: 15, why: 'assigned by name', needsOk: typeof saysOk === 'boolean' ? saysOk : routines.guessNeedsOk(text) } : await route(dept, String(text).trim());
       // needsOk is the router's judgement and it is kept: a task typed into the bar that sends, posts or
       // pays now drafts first and waits for the OK, exactly like a routine does
-      const task = newTask({ dept, agent: r.agent, title: r.title, text: String(text).trim(), plan: r.plan, why: r.why, needsOk: r.needsOk, after: Array.isArray(after) ? after.map(String) : [], goal: goal ? String(goal).slice(0, 80) : undefined, model: normModel(model) || undefined, effort: normEffort(effort) || undefined }); // model/effort: set on this task (beats routine, agent, office)
+      const task = newTask({ dept, agent: r.agent, title: r.title, text: String(text).trim(), plan: r.plan, why: r.why, needsOk: r.needsOk, after: Array.isArray(after) ? after.map(String) : [], goal: goal ? String(goal).slice(0, 80) : undefined, model: normModel(model) || undefined, effort: normEffort(effort) || undefined, extra: plan.fields }); // model/effort: set on this task (beats routine, agent, office)
       task.eta = r.eta;
       console.log(`+ ${task.id} → ${task.agent}: ${task.title}${task.needsOk ? ' (drafts first, waits for your OK)' : ''}${task.state === 'blocked' ? ' (' + task.blockedReason + ')' : ''}`);
       return json(res, 200, task);
     }
-    if (url.pathname === '/api/pending' && req.method === 'GET') { const p = coord.pending(load(), { paused: pausedNow(), agentName }); p.items.push(...pipelineDecisions(), ...researchDecisions(), ...lessonDecisions()); p.count = p.items.length; return json(res, 200, p); }
-    if (url.pathname === '/api/research' && req.method === 'GET') { const st = research.loadState(DATA); return json(res, 200, { ...research.stats(st, research.loadConfig(BRAIN)), findings: st.findings.slice(-50), published: st.published }); }
+    if (url.pathname === '/api/pending' && req.method === 'GET') { const p = coord.pending(load(), { paused: pausedNow(), agentName }); p.items.push(...pipelineDecisions(), ...researchDecisions(), ...lessonDecisions());
+      for (const i of p.items) if (i.kind === 'approval' && seatLimited(i.agent)) { i.limited = { level: seatLevel(i.agent), required: REQUIRED_FOR_OUTBOUND }; i.decision += ` ${agentName(i.agent)} is "${i.limited.level}", below the "${REQUIRED_FOR_OUTBOUND}" needed for outbound work: approving needs your override and a reason.`; }
+      p.count = p.items.length; return json(res, 200, p); }
+    if (url.pathname === '/api/research' && req.method === 'GET') { const st = research.loadState(DATA); return json(res, 200, { ...research.stats(st, research.loadConfig(BRAIN)), findings: st.findings.slice(-50), published: st.published, effects: research.ruleEffect(st, { brainPath: BRAIN, rolesOf: skillRoles }), watch: st.watch }); }
+    if (url.pathname === '/api/research/watch' && req.method === 'POST') return json(res, 200, await researchWatch({ manual: true })); // check the watched pages now
     if (url.pathname === '/api/research/run' && req.method === 'POST') { const r = researchRun(); return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : r); }
     if (url.pathname === '/api/research/rollback' && req.method === 'POST') { const b = await body(req); const st = research.loadState(DATA); const r = research.rollback(st, { brainPath: BRAIN, skill: b.skill, why: String(b.why || '') }); if (r.error) return json(res, r.status, { error: r.error }); research.saveState(DATA, st); refreshSkills(); brainGit.snapshot('research: rolled back ' + b.skill); console.log('  ↺ research rule rolled back from ' + b.skill); return json(res, 200, r); }
     const rp = url.pathname.match(/^\/api\/research\/findings\/([a-f0-9]{16})\/publish$/);
     if (rp && req.method === 'POST') { const b = await body(req); const st = research.loadState(DATA); const r = research.publish(st, { brainPath: BRAIN, shippedDir: path.join(ROOT, 'skills'), key: rp[1], skill: b.skill, rule: b.rule, approvedBy: b.approvedBy, tested: b.tested }); if (r.error) return json(res, r.status, { error: r.error }); research.saveState(DATA, st); refreshSkills(); brainGit.snapshot('research: published a rule to ' + r.published.skill); console.log('  ★ research rule published to ' + r.published.skill + ' v' + r.published.version); return json(res, 200, r); }
-    if (url.pathname === '/api/coverage' && req.method === 'GET') { refreshSkills(); return json(res, 200, coverageMod.coverage({ agents: AGENTS, skills, brainPath: BRAIN, lessons: id => learn.count(BRAIN, id) })); }
+    if (url.pathname === '/api/coverage' && req.method === 'GET') { refreshSkills(); let tl = []; try { tl = load(); } catch {} return json(res, 200, coverageMod.coverage({ agents: AGENTS, skills, brainPath: BRAIN, tasks: tl, lessons: id => learn.count(BRAIN, id) })); }
     const cr = url.pathname.match(/^\/api\/coverage\/([a-z0-9_-]+)\/review$/);
     if (cr && req.method === 'POST') { // the owner's review of a seat's fixture answers: the only thing that makes a seat "tested"
       const b = await body(req);
@@ -1053,7 +1120,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/office/pause' && req.method === 'POST') { const b = await body(req); return json(res, 200, { ok: true, paused: setPaused(true, b.why) }); }
     if (url.pathname === '/api/office/stop' && req.method === 'POST') { json(res, 200, { ok: true, stopping: true }); setTimeout(() => shutdown('stop requested', STOPPED_ON_PURPOSE), 50); return; }
     if (url.pathname === '/api/office/resume' && req.method === 'POST') { return json(res, 200, { ok: true, paused: setPaused(false) }); }
-    const own = url.pathname.match(/^\/api\/tasks\/([^/]+)\/(cancel|reassign|checked|answer|handoff)$/);
+    const own = url.pathname.match(/^\/api\/tasks\/([^/]+)\/(cancel|reassign|checked|answer|handoff|plan)$/);
     if (own && req.method === 'POST') {
       const b = await body(req);
       if (own[2] === 'handoff') { // the owner (or Claude Code) hands a finished piece of work on to another agent
@@ -1075,7 +1142,7 @@ const server = http.createServer(async (req, res) => {
     if (m && req.method === 'POST' && (m[2] === 'approve' || m[2] === 'reject')) { // D1: the owner's tick (or note) on a draft
       const b = await body(req);
       const note = String(b.feedback || '').trim();
-      const c = claim(m[1], m[2], { waitingAt: b.waitingAt }); // after the body is read: nothing may await between the check and the claim
+      const c = claim(m[1], m[2], { waitingAt: b.waitingAt, override: b.override }); // after the body is read: nothing may await between the check and the claim
       if (c.error) return json(res, c.status, { error: c.error, state: c.task?.state });
       console.log(`${m[2] === 'approve' ? '✅' : '↩'} ${c.task.id} ${m[2] === 'approve' ? 'approved — ' + agentName(c.task.agent) + ' is sending' : 'sent back: ' + note.slice(0, 80)}`);
       enqueue(() => execute(c.task.id, c.attempt.id, m[2] === 'reject' ? { feedback: note || 'Not this. Rework it.' } : {}))
@@ -1192,6 +1259,7 @@ server.listen(cfg.port, HOST, () => {
   const rl = loadRoutines(); const nx = rl.filter(r => !r.paused && r.nextAt).sort((a, b) => a.nextAt - b.nextAt)[0];
   console.log(`  routines: ${rl.length} loaded${rl.some(r => r.paused) ? ' (' + rl.filter(r => r.paused).length + ' paused)' : ''}${nx ? ' · next ' + untilText(nx.nextAt) + ' ' + nx.title.toUpperCase() + ' (' + nx.agent + ')' : ''} · ${rlist.path}`);
   if (!fs.existsSync(acq.constraintsFile(BRAIN))) { try { fs.mkdirSync(path.dirname(acq.constraintsFile(BRAIN)), { recursive: true }); fs.writeFileSync(acq.constraintsFile(BRAIN), JSON.stringify(acq.template(), null, 2) + '\n'); console.log(`  acquisition: wrote ${acq.constraintsFile(BRAIN)} with every limit unset — the owner fills it in`); } catch {} }
+  else { try { const cur = JSON.parse(fs.readFileSync(acq.constraintsFile(BRAIN), 'utf8')); const added = Object.keys(acq.CONSTRAINTS).filter(k => !(k in cur)); if (added.length) { for (const k of added) cur[k] = null; cur._meaning = { ...(cur._meaning || {}), ...acq.CONSTRAINTS }; fs.writeFileSync(acq.constraintsFile(BRAIN), JSON.stringify(cur, null, 2) + '\n'); console.log(`  acquisition: added unset slots for ${added.join(', ')} — nothing the owner set was changed`); } } catch {} } // new slots appear unset; set values are never touched
   recoverTasks(); // before the clock: pick up what a crash or restart left mid-flight
   pipelineSync();
   researchSync();

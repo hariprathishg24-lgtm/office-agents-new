@@ -253,7 +253,7 @@ else {
     });
     await step('smoke: task panel has rows and counts', async () => {
       const n = await page.evaluate(() => document.querySelectorAll('.tp-row').length); if (n < 10) throw new Error('rows: ' + n);
-      const chips = await page.evaluate(() => document.querySelectorAll('.tp-chip').length); if (chips !== 6) throw new Error('chips: ' + chips);
+      const chips = await page.evaluate(() => document.querySelectorAll('.tp-chip').length); if (chips !== 7) throw new Error('chips: ' + chips); // All · Scheduled · Backlog · In progress · Waiting · Blocked · Done
       return n + ' rows';
     });
     await step('smoke: command bar adds a task in demo mode', async () => {

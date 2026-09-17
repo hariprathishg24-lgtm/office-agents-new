@@ -273,7 +273,7 @@ function span(ms) { // "4 min" · "1 h 12 m" · "3 h"
   return r ? `${h} h ${r} m` : `${h} h`;
 }
 const agentOf = id => AGENTS.find(a => a.id === id);
-const STATE_LABEL = { next: 'Backlog', doing: 'In progress', waiting: 'Waiting', done: 'Done', sched: 'Scheduled' };
+const STATE_LABEL = { next: 'Backlog', blocked: 'Blocked', doing: 'In progress', waiting: 'Waiting', done: 'Done', sched: 'Scheduled' };
 
 export function initTasks(ctx) {
   const { R, deptRT, spawnEmote, chatPush, chatHist, feedPush, zoomToApproval, enterFocus, openAgent,
@@ -733,15 +733,20 @@ export function initTasks(ctx) {
   }
   function copyResult(t, st) { t.result = st.result; t.error = !!st.error; t.read = st.read || []; t.note = st.note; t.tools = st.tools || []; t.used = st.used || []; t.draft = st.draft; t.approved = !!st.approved; if (st.modelUsed) { t.modelUsed = st.modelUsed; t.modelFrom = st.modelFrom; t.effortUsed = st.effortUsed || ''; t.effortFrom = st.effortFrom; } }
   function apply(t, st) {
-    if (st.state === 'doing' && t.state !== 'doing') {
+    if (st.state === 'blocked') { // waits for another task: never started by this page (Phase 7)
+      if (t.state !== 'blocked') { t.state = 'blocked'; t.running = false; t.ready = false; t.progress = 0; t.changedAt = Date.now(); }
+      if (t.blockedReason !== st.blockedReason) { t.blockedReason = st.blockedReason; dirty = true; }
+    } else if (st.state === 'next' && t.state === 'blocked') {
+      t.state = 'next'; delete t.blockedReason; t.changedAt = Date.now(); dirty = true;
+    } else if ((st.state === 'doing' || st.state === 'review') && t.state !== 'doing') { // review: the reviewer is reading the draft — still in progress to the owner
       t.state = 'doing'; t.startedAt = performance.now() - Math.max(0, Date.now() - (st.startedAt || Date.now())); t.progress = 0; t.pausedAt = null; t.running = true; t.ready = false; t.srv = true; t.changedAt = st.startedAt || Date.now(); touch(t, 'started');
     } else if (st.state === 'next' && t.state === 'doing' && !(t.claimedAt && Date.now() - t.claimedAt < 15000)) { // the server restarted mid-run and put it back in the queue
       t.state = 'next'; t.running = false; t.ready = false; t.progress = 0; t.changedAt = Date.now(); dirty = true;
     } else if (st.state === 'waiting' && (t.draftAt !== st.waitingAt || (t.state !== 'waiting' && !(t.claimedAt && Date.now() - t.claimedAt < 15000)))) { // a draft is waiting for the OK (the first, a rework after REJECT, or one handed back because the send never started)
       copyResult(t, st); t.state = 'waiting'; t.draftAt = st.waitingAt; t.ask = st.ask; t.changedAt = st.waitingAt || Date.now(); t.running = true; touch(t, 'waiting');
       askApproval(t);
-    } else if (st.state === 'done' && t.state !== 'done') {
-      copyResult(t, st); t.ready = true; t.running = true; usageDue = true;
+    } else if ((st.state === 'done' || st.state === 'cancelled') && t.state !== 'done') {
+      copyResult(t, st); if (st.state === 'cancelled') { t.cancelled = true; t.error = true; } t.ready = true; t.running = true; usageDue = true;
       complete(t); t.doneAt = st.doneAt || t.doneAt; t.changedAt = t.doneAt; // straight to done here (the tick skips a stuck agent): the chat card, the note, the graph
       if (t.tools.length && onTools) onTools(t.agent, t.tools);
       if (brain && !t.error) fetch(API + '/brain').then(r => r.json()).then(g => brain.setGraph(g)).catch(() => {});
@@ -779,6 +784,7 @@ export function initTasks(ctx) {
       let r;
       try { r = await fetch(`${API}/tasks/${t.sid}/${feedback ? 'revise' : 'run'}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(feedback ? { feedback } : {}) }); }
       catch (e) { t.claimedAt = 0; console.warn('office: lost the connection while it ran — the server keeps going; the poll picks the result up:', e.message); return; } // not a failure: the work is still running on the server
+      if (r.status === 423) { t.claimedAt = Date.now(); poll(); return; } // the office is paused: not a failure — the poll hands it back to the backlog and it is tried again after the pause
       if (r.status === 409) { t.claimedAt = 0; poll(); return; } // already running (another tab, the clock) or already moved on: follow the server, never start a second run
       if (!r.ok) throw new Error((await r.json()).error || r.statusText);
       const st = await r.json();
@@ -829,7 +835,7 @@ export function initTasks(ctx) {
     return t;
   }
   // chips: filters with live counts
-  const CHIPS = [['all', 'All'], ['sched', 'Scheduled'], ['next', 'Backlog'], ['doing', 'In progress'], ['waiting', 'Waiting'], ['done', 'Done']];
+  const CHIPS = [['all', 'All'], ['sched', 'Scheduled'], ['next', 'Backlog'], ['doing', 'In progress'], ['waiting', 'Waiting'], ['blocked', 'Blocked'], ['done', 'Done']];
   function chipsHTML() {
     const scope = scoped();
     const cnt = st => st === 'all' ? scope.length : st === 'sched' ? scopedRoutines().length : scope.filter(t => t.state === st).length;
@@ -853,7 +859,8 @@ export function initTasks(ctx) {
       }
       case 'doing': return `${who}${t.live ? (t.approved === undefined && t.draftAt ? ' · sending with Claude' : ' · working with Claude') : t.agent === 'vid' ? ' · rendering' : ''}${t.routine ? ' · routine' : ''}${modelBit(t)}`;
       case 'waiting': return `<span class="tp-amber">waiting ${span(now - t.changedAt)} for your tick</span> · ${who}${t.routine ? ' · routine draft' : ''}${modelBit(t)}`;
-      case 'done': return `${who} · done ${timeStr(t.doneAt)}${t.approved ? (t.live ? ' · sent after your OK' : ' · approved') : ''}${t.late ? ' · <span class="tp-late">ran late</span>' : ''}${modelBit(t)}${t.live ? (t.error ? ' · <span class="tp-amber">failed</span>' : ' · <span class="tp-res">result ready →</span>') : ''}`;
+      case 'blocked': return `${who} · <span class="tp-amber">${esc(t.blockedReason || 'waiting for another task')}</span>`;
+      case 'done': return `${who} · done ${timeStr(t.doneAt)}${t.approved ? (t.live ? ' · sent after your OK' : ' · approved') : ''}${t.late ? ' · <span class="tp-late">ran late</span>' : ''}${modelBit(t)}${t.live ? (t.cancelled ? ' · cancelled' : t.error ? ' · <span class="tp-amber">failed</span>' : ' · <span class="tp-res">result ready →</span>') : ''}`;
     }
     return who;
   }

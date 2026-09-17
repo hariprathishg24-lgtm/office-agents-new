@@ -24,10 +24,15 @@ process.stdin.on('data', d => { input += d; });
 process.stdin.on('end', async () => {
   let user = '';
   try { user = JSON.parse(input.split('\n')[0]).message.content.filter(b => b.type === 'text').map(b => b.text).join('\n'); } catch {}
-  const mode = /You are the router/.test(system) ? 'router' : /The owner has APPROVED/.test(user) ? 'approve' : /asked for changes/.test(user) ? 'rework' : /judged read-only/.test(user) ? 'readonly' : /send, post, pay or change NOTHING/.test(user) ? 'draft' : 'other';
+  const mode = /You are the router/.test(system) ? 'router' : /VERDICT: PASS/.test(system) ? 'review' : /The owner has APPROVED/.test(user) ? 'approve' : /asked for changes/.test(user) ? 'rework' : /judged read-only/.test(user) ? 'readonly' : /send, post, pay or change NOTHING/.test(user) ? 'draft' : 'other';
   const marker = (user.match(/\[fake:([a-z]+)(?:=(\d+))?\]/) || []);
   const request = (user.match(/Owner's request: "?([^\n]*)/) || [])[1] || '';
-  log({ mode, marker: marker[1] || '', request, systemChars: system.length, probe: process.env.FAKE_PROBE ? system.includes(process.env.FAKE_PROBE) : undefined });
+  const approvedPart = mode === 'approve' ? user.slice(user.indexOf('Approved draft:')) : '';
+  log({ mode, marker: marker[1] || '', request, systemChars: system.length, probe: process.env.FAKE_PROBE ? system.includes(process.env.FAKE_PROBE) : undefined, controlLinesInSend: mode === 'approve' ? /HANDOFF|NEEDS OWNER/.test(approvedPart) : undefined });
+  if (mode === 'review') {
+    emit({ type: 'result', subtype: 'success', is_error: false, result: /\[fake:reviewfail\]/.test(user) ? 'VERDICT: FAIL\n- "we doubled revenue for 40 clients" — invented proof, we have no clients' : 'VERDICT: PASS' });
+    return process.exit(0);
+  }
   emit({ type: 'system', subtype: 'init', mcp_servers: [], tools: [] });
 
   if (mode === 'router') {
@@ -47,6 +52,11 @@ process.stdin.on('end', async () => {
     if (marker[1] === 'sendfail') { await sleep(50); return process.exit(1); }
     emit({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 's1', is_error: false }] } });
   }
-  emit({ type: 'result', subtype: 'success', is_error: false, result: `FAKE ${mode} for: ${request}`, usage: { input_tokens: 1, output_tokens: 1 } });
+  let extra = '';
+  if (mode !== 'approve') {
+    for (const h of user.matchAll(/\[fake:handoff:([a-z0-9]+)\]/g)) extra += `\nHANDOFF → ${h[1]}: enrich the prospect found in "${request.replace(/\[fake:[^\]]*\]/g, '').trim()}"`;
+    if (/\[fake:ask\]/.test(user)) extra += '\nNEEDS OWNER: what is the monthly outreach budget?';
+  }
+  emit({ type: 'result', subtype: 'success', is_error: false, result: `FAKE ${mode} for: ${request}${extra}`, usage: { input_tokens: 1, output_tokens: 1 } });
   process.exit(0);
 });

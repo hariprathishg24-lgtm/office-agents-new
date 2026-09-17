@@ -47,6 +47,7 @@ import { claudeBin, claudeSource, spawnClaude } from './claude-bin.mjs';
 import { readJSON, writeJSON, StoreError } from './store.mjs';
 import * as brainGit from './brain-git.mjs';
 import { scrub } from './scrub.mjs';
+import * as coord from './coordinator.mjs';
 
 const cfg = loadConfig();
 const HTML = path.join(ROOT, 'dist', 'command-centre-v2.html'); // built by build.mjs; shipped so npm start works without a build
@@ -92,7 +93,7 @@ if (process.env.ANTHROPIC_API_KEY) {
 // Missing file = no tasks yet. A damaged file is NOT "no tasks": store.mjs keeps the damaged copy,
 // falls back to the last good one, and otherwise throws, so a save can never write [] over it.
 const load = () => { const v = readJSON(FILE, []); if (!Array.isArray(v)) throw new StoreError(FILE + ' does not hold a task list', FILE); return v; };
-const save = list => writeJSON(FILE, list);
+const save = list => { let prev = []; try { prev = readJSON(FILE, []); } catch {} writeJSON(FILE, coord.stampHistory(list, prev)); }; // every change of state lands in task.history with its reason
 const nid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 /* ---------- the usage gauge (V3.6, A3): Claude's own numbers, the office's count underneath ---------- */
 const USTATE = usage.loadState(DATA);
@@ -350,11 +351,12 @@ async function run(task, feedback, mode, { onToolUse } = {}) {
   const system = `You are ${a.name}, ${a.role || 'an agent'}, in the ${d.name} department of ${cfg.name}. ${a.does}\n${agentBrief(a)}` +
     'Write the finished deliverable itself, not a description of what you would do. Plain text: a short heading, then short sections or bullets. ' +
     'At most 260 words unless a skill or the owner\'s instructions set a different shape — those win. No preamble, no sign-off. Ground it in the company notes below; where a fact is missing, say plainly that it is missing — never invent a figure, price, client, result or policy to fill the gap. ' +
-    'If you used a tool, say so in one line at the end ("Used: Gmail — searched the client thread").\n\n' +
+    'If you used a tool, say so in one line at the end ("Used: Gmail — searched the client thread").\n' +
+    `If part of this is another agent's job, end with up to ${coord.MAX_HANDOFFS} lines "HANDOFF → <agent id>: <what they must do, with the facts they need>"; that work starts after yours is finished (for a draft, after the owner approves it). If you need a decision or a fact only the owner has, add a line "NEEDS OWNER: <the question>" instead of guessing. These lines are notes to the office and are never sent to anyone. Agent ids: ${AGENTS.filter(x => x.id !== a.id).map(x => `${x.id} (${x.name.toLowerCase()})`).join(', ')}.\n\n` +
     `${mcp.promptText(a.tools)}\n\n${NOTES_HEADER}\n\n${businessContext(index)}\n\nNOTES YOU READ FOR THIS TASK\n${contextText(index, read)}`;
   const routineLine = task.routine ? `\nThis is a routine (${task.when}): it runs on the office's own clock and the owner is not at the keyboard. It is now ${new Date().toLocaleString([], { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })}${task.late ? `; this run is late, it was due ${new Date(task.due).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}` : ''}. Do the work for now.` : '';
   const modeLine = mode === 'draft' ? '\nPrepare everything, but send, post, pay or change NOTHING outside this machine: the owner reads this first and approves it. End with one line saying exactly what will go out when approved (or that nothing needs to).'
-    : mode === 'approve' ? `\nThe owner has APPROVED the draft below. Carry out the outbound step now, exactly as drafted, with your tools (send, post, update). If a tool you need is not connected, say so and show what you would have sent. Then report in one short section: what went out, to whom, and anything that did not.\nApproved draft:\n${task.approval.draft}`
+    : mode === 'approve' ? `\nThe owner has APPROVED the draft below. Carry out the outbound step now, exactly as drafted, with your tools (send, post, update). If a tool you need is not connected, say so and show what you would have sent. Then report in one short section: what went out, to whom, and anything that did not. Do not hand off or ask anything in this step.\nApproved draft:\n${withoutControlLines(task.approval.draft)}`
     : '\nThis task was judged read-only: read, research and report. Send, post, pay, delete or change NOTHING outside this machine. If doing it properly needs an outbound step, draft that step and say it needs the owner\'s OK.';
   const user = `Task: ${task.title}\nOwner's request: ${task.text}` + (task.plan?.length ? `\nAgreed plan: ${task.plan.join(' → ')}` : '') + routineLine + modeLine +
     (feedback && mode !== 'approve' ? `\n\nThe owner reviewed your previous version and asked for changes: "${feedback}"\nPrevious version:\n${task.result}` : '');
@@ -427,11 +429,11 @@ function loadRoutines() { // re-read from disk every time: a routine written by 
 }
 const routinesOut = () => { const list = loadRoutines(); return { routines: list, depts: routines.ALLOWED, path: rlist.path, problems: rlist.problems }; };
 const agentName = id => AGENTS.find(a => a.id === id)?.name || id;
-/// routine-driven runs go one at a time, so a burst of catch-ups after a long sleep does not spawn five Claude processes at once
+// routine-driven runs go one at a time, so a burst of catch-ups after a long sleep does not spawn five Claude processes at once
 let queue = Promise.resolve();
 const enqueue = fn => { const p = queue.then(fn, fn); queue = p.catch(() => {}); return p; };
 function fire(r, { due = Date.now(), late = false, by = 'routine' } = {}) { // the routine becomes a task and runs here, page or no page
-  const task = { id: nid(), dept: r.dept, agent: r.agent, title: r.title, text: r.text, plan: r.plan || [], eta: 15, why: '', state: 'next', addedAt: Date.now(), by, routine: r.id, when: r.desc || describe(r.when), needsOk: r.needsOk, due, late, routineModel: r.model || undefined, routineEffort: r.effort || undefined };
+  const task = { id: nid(), dept: r.dept, agent: r.agent, title: r.title, text: r.text, plan: r.plan || [], eta: 15, why: '', state: 'next', addedAt: Date.now(), by, routine: r.id, when: r.desc || describe(r.when), needsOk: r.needsOk, due, late, routineModel: r.model || undefined, routineEffort: r.effort || undefined, because: `routine ${r.id} fired${late ? ' late' : ''}` };
   const list = load(); list.push(task); save(list);
   routines.advance(RSTATE, r, Date.now(), task.id, late); routines.saveState(DATA, RSTATE);
   console.log(`⏱ ${task.id} → ${task.agent}: ${task.title}${late ? ' (LATE · was due ' + new Date(due).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ')' : ''}`);
@@ -440,14 +442,16 @@ function fire(r, { due = Date.now(), late = false, by = 'routine' } = {}) { // t
 }
 
 /* ---------- the task lifecycle ----------
+   blocked ──prerequisites done──▶ next
    next ──run──▶ doing ──▶ done                 (judged read-only: needsOk false)
-                      └──▶ waiting ──approve──▶ doing ──▶ done           (anything outbound: a draft first)
-                               └──reject───▶ doing ──▶ waiting (the rework)
+                      └──▶ review ──▶ waiting ──approve──▶ doing ──▶ done      (anything outbound: a draft, a reviewer, the owner)
+                                         └──reject───▶ doing ──▶ review ──▶ waiting (the rework)
    done ──revise──▶ doing ──▶ done or waiting
+   next · blocked · waiting ──cancel──▶ cancelled
 
-   One policy for every path. A task typed into the bar, a routine firing, a revision and an
-   approval all go through claim() and execute(); whether the agent may send is decided by the
-   task's needsOk (from the router or the routine), never by which button started it.
+   One policy for every path. A task typed into the bar, a routine firing, a handoff, a revision and
+   an approval all go through claim() and execute(); whether the agent may send is decided by the
+   task's needsOk (from the router, the routine or the handoff), never by which button started it.
 
    claim() checks the state and writes 'doing' in one synchronous step — no await between the read
    and the write — so two clicks, two tabs, or the page and the clock asking at once get exactly
@@ -457,15 +461,25 @@ function fire(r, { due = Date.now(), late = false, by = 'routine' } = {}) { // t
    ticks it. A new draft (a rework) gets a new hash and needs a new tick; an approve request that
    names an older draft is refused. If the send fails, what happens next depends on whether the
    agent had started calling a tool: if not, nothing can have gone out and the draft goes back to
-   waiting; if it had, the outcome is UNKNOWN — the task says so and is never retried automatically. */
+   waiting; if it had, the outcome is UNKNOWN — the task says so and is never retried automatically.
+
+   Every change of state is written into task.history with its reason (coordinator.stampHistory). */
 const hash = text => crypto.createHash('sha256').update(String(text)).digest('hex').slice(0, 16);
 const modeFor = t => t.needsOk === false ? 'readonly' : 'draft'; // unknown = the safe side: draft, and wait for the OK
 const ACTIONS = { run: ['next'], revise: ['done'], approve: ['waiting'], reject: ['waiting'] };
+const RUNNING = ['doing', 'review'];
+// the owner's pause: nothing new starts — no routine, no queued task, no run, no approval — until resumed
+const OFFICE_FILE = path.join(DATA, 'office.json');
+let office = (() => { try { return readJSON(OFFICE_FILE, {}); } catch { return {}; } })();
+const pausedNow = () => office.paused ? { paused: true, at: office.pausedAt, why: office.pausedWhy || '' } : null;
 function claim(id, action, { waitingAt } = {}) {
+  if (office.paused) return { status: 423, error: `the office is paused${office.pausedWhy ? ' (' + office.pausedWhy + ')' : ''} — resume it to start or approve work` };
   const list = load(); const t = list.find(x => x.id === id);
   if (!t) return { status: 404, error: 'no such task' };
   if (!ACTIONS[action].includes(t.state)) {
-    const why = t.state === 'doing' ? 'this task is already running — nothing new was started'
+    const why = RUNNING.includes(t.state) ? 'this task is already running — nothing new was started'
+      : t.state === 'blocked' ? `this task is blocked — ${t.blockedReason || 'its prerequisites are not finished'}`
+      : t.state === 'cancelled' ? 'this task was cancelled'
       : action === 'approve' || action === 'reject' ? 'this task is not waiting for your OK' : `a task that is ${t.state} cannot be ${action === 'run' ? 'run' : 'revised'}`;
     return { status: 409, error: why, task: t };
   }
@@ -476,57 +490,114 @@ function claim(id, action, { waitingAt } = {}) {
     if (!t.draft || hash(t.draft) !== t.draftHash) return { status: 409, error: 'the draft was edited after it was written — send it back for rework rather than approving an unchecked text', task: t };
   }
   const at = { id: nid(), action, mode: action === 'approve' ? 'approve' : modeFor(t), startedAt: Date.now() };
-  if (action === 'approve') { t.approval = { draft: t.draft, draftHash: t.draftHash, approvedAt: at.startedAt, attempt: at.id, scope: 'send this draft once, as written' }; delete t.sendStartedAt; }
+  if (action === 'approve') { t.approval = { draft: t.draft, draftHash: t.draftHash, approvedAt: at.startedAt, attempt: at.id, scope: 'send this draft once, as written', review: t.review ? { agent: t.review.agent, verdict: t.review.verdict } : null }; delete t.sendStartedAt; }
   t.attempts = [...(t.attempts || []), at]; t.attempt = at.id;
-  t.state = 'doing'; t.startedAt = at.startedAt; delete t.ask;
+  t.state = 'doing'; t.startedAt = at.startedAt; delete t.ask; t.because = `${action} (attempt ${at.id})`;
   save(list);
   return { task: t, attempt: at };
 }
 // the clock's path: claim at the moment the queue reaches the task (the page may have started it first)
 async function startQueued(id) {
+  if (office.paused) return null; // stays next; resume queues it again
   const c = claim(id, 'run');
-  if (c.error) { if (c.status !== 404 && c.task?.state !== 'doing') console.warn(`  ${id}: ${c.error}`); return c.task || null; }
+  if (c.error) { if (c.status !== 404 && !RUNNING.includes(c.task?.state)) console.warn(`  ${id}: ${c.error}`); return c.task || null; }
   return execute(id, c.attempt.id);
 }
+const serverRuns = t => t.by !== 'you'; // tasks from the bar are started by the page; everything else by the server's queue
 function patchTask(id, fn) { const list = load(); const t = list.find(x => x.id === id); if (t && fn(t) !== false) save(list); }
+
+// The independent reviewer: reads an outbound draft before the owner does. It never sends and it
+// cannot approve — a FAIL is shown to the owner beside the draft, and a PASS is only a PASS.
+const reviewerFor = t => {
+  if (cfg.review?.outbound === false) return null;
+  const r = AGENTS.find(a => a.id === (cfg.review?.outbound || 'qa'));
+  return r && r.id !== t.agent ? r : null;
+};
+const CONTROL_LINE = /^[\s>*\-•]*(HANDOFF\s*(→|->|=>|to)|NEEDS OWNER\s*:)/i;
+const withoutControlLines = text => String(text || '').split(/\r?\n/).filter(l => !CONTROL_LINE.test(l)).join('\n').trim();
+async function reviewDraft(task, draft, attemptId) {
+  const r = reviewerFor(task); if (!r) return null;
+  patchTask(task.id, t => { if (t.attempt !== attemptId) return false; t.state = 'review'; t.because = `${r.name} is reviewing the draft`; });
+  const index = vaultIndex();
+  const system = `You are ${r.name}, ${r.role}, at ${cfg.name}. You check another agent's outbound draft BEFORE the owner reads it. You never send, change or approve anything.\n` +
+    'Check, against the company notes below only:\n- every price, figure, client, result or claim is supported by a note (prices only from offer-ladder); nothing is invented or implied (no track record we do not have)\n- it does what the owner asked, for the right recipient, and says what will go out\n- nothing promises a policy, term or date the notes call "not established"\n- tone follows the house style\n' +
+    'Answer with the first line exactly "VERDICT: PASS" or "VERDICT: FAIL", then at most 6 short bullets, each quoting the exact words that are wrong and saying why. No other preamble.\n\n' +
+    `${NOTES_HEADER}\n\n${businessContext(index)}`;
+  const user = `Task: ${task.title}\nOwner's request: ${task.text}\nAuthor: ${agentName(task.agent)}\n\nDRAFT TO CHECK:\n${draft}`;
+  const at = Date.now();
+  try {
+    const v = coord.parseVerdict(await ask(system, user, { maxTokens: 900, model: 'sonnet' }));
+    return { agent: r.id, verdict: v.verdict, notes: v.notes, at, draftHash: hash(draft) };
+  } catch (e) { return { agent: r.id, verdict: 'NOT REVIEWED', notes: 'The review could not run: ' + e.message, at, draftHash: hash(draft) }; }
+}
+
+// A finished result can hand work to another agent and ask the owner questions (coordinator.parseRequests).
+function followUps(list, t, text) {
+  const req = coord.parseRequests(text, AGENTS.map(a => a.id));
+  const made = [];
+  if (req.owner.length) t.needsOwner = [...(t.needsOwner || []), ...req.owner.map(q => ({ text: q, at: Date.now() }))];
+  const depth = (t.depth || 0) + 1;
+  if (req.handoffs.length && depth > coord.MAX_DEPTH) req.refused.push(`handoffs deeper than ${coord.MAX_DEPTH} levels are not created`);
+  else for (const h of req.handoffs) {
+    const a = AGENTS.find(x => x.id === h.agent);
+    const task = { id: nid(), dept: a.department, agent: a.id, title: h.text.split(/(?<=[.!?])\s/)[0].slice(0, 90), text: h.text, plan: [], eta: 15, why: `handed off by ${agentName(t.agent)}`,
+      state: 'next', addedAt: Date.now(), by: 'handoff', from: t.id, goal: t.goal || t.id, after: [t.id], depth, needsOk: routines.guessNeedsOk(h.text), because: `handed off by ${agentName(t.agent)} from "${t.title}"` };
+    list.push(task); made.push(task);
+  }
+  if (req.refused.length) t.handoffsRefused = req.refused;
+  return made;
+}
+function afterChange(list) { // re-check what was waiting on this; queue what can now run on the server
+  const started = coord.unblock(list);
+  return started.map(id => list.find(t => t.id === id)).filter(serverRuns);
+}
+
 async function execute(id, attemptId, { feedback } = {}) {
   const snap = load().find(t => t.id === id);
   const at = snap?.attempts?.find(a => a.id === attemptId);
   if (!snap || !at || snap.attempt !== attemptId) return snap || null;
-  let out = null, failure = null, sendMarked = false;
+  let out = null, failure = null, sendMarked = false, review = null;
   // the first tool call of an approved send is written to disk as it happens: after a crash, that is
   // the difference between "nothing went out" and "it may have gone out"
   const onToolUse = at.mode === 'approve' ? () => { if (sendMarked) return; sendMarked = true; patchTask(id, t => { if (t.attempt !== attemptId) return false; t.sendStartedAt = Date.now(); }); } : null;
   try { out = await run(snap, feedback, at.mode, { onToolUse }); } catch (e) { failure = e; }
+  if (out && at.mode === 'draft') review = await reviewDraft(snap, out.result, attemptId);
 
   const list = load(); const t = list.find(x => x.id === id);
   if (!t) { console.log(`  ${id} was deleted while it ran — its result was dropped`); return null; }
   if (t.attempt !== attemptId) return t;
   const a = t.attempts.find(x => x.id === attemptId); a.endedAt = Date.now(); delete t.attempt;
+  let made = [];
   if (out) {
     a.outcome = 'ok';
     Object.assign(t, { read: out.read, sources: out.sources, tools: [...new Set([...(t.tools || []), ...out.tools])], used: [...new Set([...(t.used || []), ...out.used])], blocked: out.blocked, skills: out.skills, error: false, modelUsed: out.modelUsed, modelFrom: out.modelFrom, modelId: out.modelId, effortUsed: out.effortUsed, effortFrom: out.effortFrom });
     delete t.lastError;
-    if (at.mode === 'approve') { t.result = t.approval.draft + '\n\n---\nAFTER YOUR OK\n' + out.result; t.approved = true; t.approvedAt = t.approval.approvedAt; t.state = 'done'; t.doneAt = Date.now(); }
-    else if (at.mode === 'draft') { t.result = out.result; t.draft = out.result; t.draftHash = hash(out.result); t.waitingAt = Date.now(); t.state = 'waiting'; t.ask = routines.askLine(t); }
-    else { t.result = out.result; t.state = 'done'; t.doneAt = Date.now(); }
+    if (at.mode === 'approve') { t.result = t.approval.draft + '\n\n---\nAFTER YOUR OK\n' + out.result; t.approved = true; t.approvedAt = t.approval.approvedAt; t.state = 'done'; t.doneAt = Date.now(); t.because = 'sent after the owner approved'; made = followUps(list, t, t.approval.draft); }
+    else if (at.mode === 'draft') {
+      Object.assign(t, { result: out.result, draft: out.result, draftHash: hash(out.result), waitingAt: Date.now(), state: 'waiting', because: review ? `drafted; ${agentName(review.agent)}: ${review.verdict}` : 'drafted' });
+      if (review) t.review = review; else delete t.review;
+      t.ask = review && review.verdict !== 'PASS'
+        ? `"${t.title}" is ready, but ${agentName(review.agent)} ${review.verdict === 'FAIL' ? 'FAILED it' : 'could not check it'}: ${(review.notes.split('\n').find(l => l.trim()) || '').replace(/^[-•*\s]+/, '').slice(0, 160)}. Read the review before you approve.`
+        : routines.askLine(t) + (review ? ` ${agentName(review.agent)} checked it: PASS.` : '');
+    }
+    else { t.result = out.result; t.state = 'done'; t.doneAt = Date.now(); t.because = 'finished'; made = followUps(list, t, out.result); }
   } else {
     Object.assign(a, { outcome: 'error', error: failure.message, phase: failure.phase || '' });
     t.lastError = failure.message;
     if (at.mode === 'approve' && !failure.toolsAttempted && !t.sendStartedAt) {
       a.outcome = 'not-sent'; // the agent never reached a tool, so nothing left this machine; the approval is spent
-      Object.assign(t, { state: 'waiting', waitingAt: Date.now(), error: false, ask: `"${t.title}" was approved but the send never started (${failure.message}). Nothing went out. Approve again to retry, or reject to change it.` });
+      Object.assign(t, { state: 'waiting', waitingAt: Date.now(), error: false, because: 'send never started', ask: `"${t.title}" was approved but the send never started (${failure.message}). Nothing went out. Approve again to retry, or reject to change it.` });
       delete t.approval;
     } else if (at.mode === 'approve') {
       a.outcome = 'unknown';
-      Object.assign(t, { state: 'done', doneAt: Date.now(), error: true, needsCheck: true,
+      Object.assign(t, { state: 'done', doneAt: Date.now(), error: true, needsCheck: true, because: 'send outcome unknown',
         result: t.approval.draft + `\n\n---\nAFTER YOUR OK — OUTCOME UNKNOWN\nThe agent started the send and then stopped reporting (${failure.message}). It may have gone out, in part or in full. It has NOT been retried and will not be. Check the connector (the sent folder, the post, the record) before doing anything else with this.` + (failure.partial ? `\n\nThe agent's last words:\n${failure.partial}` : '') });
     } else if (at.action === 'reject' && t.draft) {
-      Object.assign(t, { state: 'waiting', waitingAt: Date.now(), error: false, ask: `The rework of "${t.title}" failed (${failure.message}). The previous draft is still here — approve it as it is, or reject again.` });
+      Object.assign(t, { state: 'waiting', waitingAt: Date.now(), error: false, because: 'rework failed', ask: `The rework of "${t.title}" failed (${failure.message}). The previous draft is still here — approve it as it is, or reject again.` });
     } else if (at.action === 'revise') {
-      Object.assign(t, { state: 'done', error: false }); // the previous result stands; the failed revision is in lastError and the attempt
+      Object.assign(t, { state: 'done', error: false, because: 'revision failed' }); // the previous result stands; the failed revision is in lastError and the attempt
     } else {
-      Object.assign(t, { state: 'done', doneAt: Date.now(), error: true, result: 'Could not complete this task: ' + failure.message + (failure.partial ? `\n\nPartial output — NOT a finished result:\n${failure.partial}` : '') });
+      Object.assign(t, { state: 'done', doneAt: Date.now(), error: true, because: 'failed: ' + failure.message.slice(0, 120), result: 'Could not complete this task: ' + failure.message + (failure.partial ? `\n\nPartial output — NOT a finished result:\n${failure.partial}` : '') });
     }
   }
   // Filing is not the work. A note that fails to save must not turn a finished task — least of all
@@ -535,12 +606,67 @@ async function execute(id, attemptId, { feedback } = {}) {
     try { t.note = writeNote(t); t.filed = 'ok'; delete t.noteError; }
     catch (e) { t.filed = 'failed'; t.noteError = e.message; console.warn(`  ⚠ ${t.id}: the work is done but the note could not be saved: ${e.message}`); }
   }
+  const runnable = afterChange(list);
   save(list);
+  for (const n of made) console.log(`  ↳ handoff ${n.id} → ${n.agent}: ${n.title}`);
+  for (const n of [...made, ...runnable]) enqueue(() => startQueued(n.id)); // a handoff starts as next (its prerequisite just finished); the queue takes it
   if (t.filed === 'ok' && t.state === 'done') await rebuildGraph();
-  const tag = t.needsCheck ? '? outcome unknown' : t.error ? '✗ failed' : t.state === 'waiting' ? '⏸ waiting for your OK' : a.outcome === 'error' ? '✗ revision failed, previous result kept' : '✓ done';
+  const tag = t.needsCheck ? '? outcome unknown' : t.error ? '✗ failed' : t.state === 'waiting' ? `⏸ waiting for your OK${t.review ? ' (review: ' + t.review.verdict + ')' : ''}` : a.outcome === 'error' ? '✗ revision failed, previous result kept' : '✓ done';
   console.log(`${tag.slice(0, 1)} ${t.id} ${tag.slice(2)} (${a.action}/${a.mode}${failure ? ': ' + failure.message.slice(0, 160) : ''}${t.tools?.length ? ', tools: ' + t.tools.join(' ') : ''}${t.note && t.filed === 'ok' && !failure ? ', note: ' + t.note : ''})`);
   return t;
 }
+
+/* ---------- the owner's controls over tasks (Phase 7) ---------- */
+function newTask({ dept, agent, title, text, needsOk, after = [], goal, by = 'you', plan = [], why = '', model, effort }) {
+  const list = load();
+  const known = after.filter(id => list.some(t => t.id === id));
+  const task = { id: nid(), dept, agent, title, text, plan, eta: 15, why, needsOk, state: coord.initialState(known, list), addedAt: Date.now(), by, ...(known.length ? { after: known } : {}), ...(goal ? { goal } : {}), model, effort, because: known.length ? `created; waits for ${known.length} task${known.length > 1 ? 's' : ''}` : 'created' };
+  list.push(task); coord.unblock(list); save(list);
+  if (task.state === 'next' && serverRuns(task)) enqueue(() => startQueued(task.id));
+  return list.find(t => t.id === task.id);
+}
+function ownerAction(id, verb, b) {
+  const list = load(); const t = list.find(x => x.id === id);
+  if (!t) return { status: 404, error: 'no such task' };
+  const note = String(b.why || b.note || '').trim().slice(0, 300);
+  if (verb === 'cancel') {
+    if (!['next', 'blocked', 'waiting'].includes(t.state)) return { status: 409, error: RUNNING.includes(t.state) ? 'it is running — cancel it when it stops' : `a task that is ${t.state} cannot be cancelled` };
+    Object.assign(t, { state: 'cancelled', cancelledAt: Date.now(), because: 'cancelled by the owner' + (note ? ': ' + note : '') }); delete t.ask;
+  } else if (verb === 'reassign') {
+    const a = AGENTS.find(x => x.id === b.agent);
+    if (!a) return { status: 400, error: 'no such agent' };
+    if (!['next', 'blocked'].includes(t.state)) return { status: 409, error: 'only work that has not started can be reassigned' };
+    t.reassigned = [...(t.reassigned || []), { from: t.agent, to: a.id, at: Date.now(), why: note }];
+    Object.assign(t, { agent: a.id, dept: a.department });
+    t.history = [...(t.history || []), { at: Date.now(), from: t.state, to: t.state, why: `reassigned to ${a.name}${note ? ': ' + note : ''}` }];
+  } else if (verb === 'checked') { // reconcile an unknown outcome: the owner looked and says whether it went out
+    if (!t.needsCheck) return { status: 409, error: 'this task has no unknown outcome to check' };
+    if (typeof b.sent !== 'boolean') return { status: 400, error: 'say whether it went out: {"sent": true} or {"sent": false}' };
+    t.reconciled = { sent: b.sent, note, at: Date.now() }; t.needsCheck = false;
+    if (b.sent) Object.assign(t, { error: false, approved: true, because: 'owner confirmed it went out' + (note ? ': ' + note : '') });
+    else { Object.assign(t, { state: 'waiting', error: false, waitingAt: Date.now(), result: t.draft, because: 'owner confirmed it did not go out', ask: `"${t.title}" did not go out (you checked). Approve again to send it, or reject to change it.` }); delete t.approval; }
+  } else if (verb === 'answer') { // an agent's NEEDS OWNER question, answered: the agent picks the work up again with the answer
+    const q = (t.needsOwner || []).filter(x => !x.answered)[+b.index || 0];
+    const answer = String(b.text || '').trim();
+    if (!q) return { status: 409, error: 'no open question on this task' };
+    if (!answer) return { status: 400, error: 'empty answer' };
+    Object.assign(q, { answered: true, answer, answeredAt: Date.now() });
+    save(list);
+    const follow = newTask({ dept: t.dept, agent: t.agent, title: `${t.title} — with your answer`.slice(0, 90), text: `${t.text}\n\nYou asked the owner: "${q.text}"\nThe owner answered: "${answer}"\nYour previous result:\n${String(t.result || '').slice(0, 3000)}`, needsOk: t.needsOk, goal: t.goal || t.id, by: 'answer' });
+    return { task: t, follow };
+  } else return { status: 400, error: 'unknown action' };
+  const runnable = afterChange(list); save(list);
+  for (const n of runnable) enqueue(() => startQueued(n.id));
+  return { task: list.find(x => x.id === id) };
+}
+function setPaused(paused, why) {
+  office = paused ? { ...office, paused: true, pausedAt: Date.now(), pausedWhy: String(why || '').slice(0, 200) } : { ...office, paused: false, resumedAt: Date.now() };
+  writeJSON(OFFICE_FILE, office);
+  console.log(paused ? `⏸ office PAUSED${office.pausedWhy ? ': ' + office.pausedWhy : ''} — nothing new starts` : '▶ office resumed');
+  if (!paused) for (const t of load().filter(t => t.state === 'next' && serverRuns(t))) enqueue(() => startQueued(t.id));
+  return pausedNow();
+}
+
 // After a crash, a restart or a sleep, the queue in memory is gone. Nothing that was mid-flight is
 // silently dropped, and nothing that might have sent something is silently repeated.
 function recoverTasks() {
@@ -548,13 +674,14 @@ function recoverTasks() {
   let changed = false; const requeue = [], notes = [];
   for (const t of list) {
     if (t.state === 'waiting' && t.draft && !t.draftHash) { t.draftHash = hash(t.draft); t.waitingAt = t.waitingAt || Date.now(); changed = true; } // drafts from before approvals were tied to their text
-    if (t.state === 'next' && t.by === 'routine') { requeue.push(t.id); continue; }
-    if (t.state !== 'doing') continue;
+    if (t.state === 'next' && serverRuns(t)) { requeue.push(t.id); continue; }
+    if (!RUNNING.includes(t.state)) continue;
     changed = true;
     const at = (t.attempts || []).find(x => x.id === t.attempt);
     if (at) Object.assign(at, { endedAt: Date.now(), outcome: 'interrupted' });
     delete t.attempt;
     const action = at ? at.action : t.draft ? 'approve' : 'run'; // before attempts were recorded: a draft in flight may have been a send
+    t.because = 'interrupted by a restart';
     if (action === 'approve' && at && !t.sendStartedAt) {
       Object.assign(t, { state: 'waiting', waitingAt: Date.now(), ask: `The office restarted before "${t.title}" was sent. Nothing went out. Approve again to send it.` });
       delete t.approval; notes.push(`${t.id} back to waiting (restart before the send)`);
@@ -573,14 +700,16 @@ function recoverTasks() {
       notes.push(`${t.id} failed after ${t.attempts.length} interrupted attempts`);
     } else {
       t.state = 'next'; t.interrupted = (t.interrupted || 0) + 1;
-      if (t.by === 'routine') requeue.push(t.id);
+      if (serverRuns(t)) requeue.push(t.id);
       notes.push(`${t.id} back to next (interrupted)`);
     }
   }
+  const unblocked = afterChange(list); if (unblocked.length) changed = true;
   if (changed) save(list);
   for (const n of notes) console.log('  ↺ ' + n);
-  for (const id of requeue) enqueue(() => startQueued(id));
-  if (requeue.length) console.log(`  ↺ ${requeue.length} routine task${requeue.length > 1 ? 's' : ''} queued again`);
+  for (const id of [...requeue, ...unblocked.map(t => t.id)]) enqueue(() => startQueued(id));
+  if (requeue.length + unblocked.length) console.log(`  ↺ ${requeue.length + unblocked.length} task${requeue.length + unblocked.length > 1 ? 's' : ''} queued again`);
+  if (office.paused) console.log(`  ⏸ the office is PAUSED${office.pausedWhy ? ' (' + office.pausedWhy + ')' : ''} — nothing starts until you resume`);
 }
 // The usage budget. A office of this size firing routines every morning can burn a whole Claude
 // plan window before lunch, and the failure mode is silent: the plan runs out and work just stops.
@@ -604,6 +733,7 @@ async function routinesHeld() {
   } catch { return false; }
 }
 async function tickRoutines() {
+  if (office.paused) return; // paused: routines stay due and fire once the owner resumes
   let list; try { list = loadRoutines(); } catch (e) { console.warn('routines:', e.message); return; }
   const dueNow = routines.due(list, RSTATE);
   if (!dueNow.length) return;
@@ -692,7 +822,7 @@ const server = http.createServer(async (req, res) => {
       return res.end(url.pathname === '/dark' ? page.replace('<body>', '<body class="dark">') : page); // /dark: the same file, opened in dark mode
     }
     if (url.pathname === '/api/health') return json(res, 200, { ok: true, version, backend, model: cfg.model, modelName: modelName(cfg.model), models: MODEL_KEYS, effort: cfg.effort || '', efforts: EFFORT_KEYS, name: cfg.name, brain: BRAIN, notes: graph.notes, depts: DEPT_KEYS,
-      agents: agentsOut(), setup: setupMap(), routines: (l => ({ count: l.length, paused: l.filter(r => r.paused).length, depts: routines.ALLOWED }))(loadRoutines()), roster: { customised: roster.customised, briefed: roster.briefed, files: roster.files, problems: roster.problems }, skills: (({ count, shipped, brain, problems }) => ({ count, shipped, brain, problems }))(skills.summary()), tools: backend === 'claude-cli', mcp: mcp.summary(), clock: CLOCK_ON, host: HOST });
+      agents: agentsOut(), setup: setupMap(), routines: (l => ({ count: l.length, paused: l.filter(r => r.paused).length, depts: routines.ALLOWED }))(loadRoutines()), roster: { customised: roster.customised, briefed: roster.briefed, files: roster.files, problems: roster.problems }, skills: (({ count, shipped, brain, problems }) => ({ count, shipped, brain, problems }))(skills.summary()), tools: backend === 'claude-cli', mcp: mcp.summary(), clock: CLOCK_ON, host: HOST, paused: pausedNow() });
     if (url.pathname === '/api/agents') return json(res, 200, { agents: agentsOut(), problems: roster.problems, files: roster.files });
     if (url.pathname === '/api/skills') return json(res, 200, refreshSkills().summary()); // reloads from disk: edit a skill, hit this, see it
     if (url.pathname === '/api/lessons') return json(res, 200, { dir: learn.dir(BRAIN), agents: AGENTS.map(a => ({ id: a.id, name: a.name, ...learn.read(BRAIN, a.id) })).filter(x => x.rules.length || x.oneOffs.length) });
@@ -725,16 +855,32 @@ const server = http.createServer(async (req, res) => {
       editRoutine(r.id, patch); return json(res, 200, { ok: true, routines: loadRoutines() });
     }
     if (url.pathname === '/api/tasks' && req.method === 'POST') {
-      const { dept, text, model, effort } = await body(req);
+      const { dept, text, model, effort, after, goal } = await body(req);
       if (!DEPTS[dept] || dept === 'brain') return json(res, 400, { error: 'unknown department' });
       if (!text || !String(text).trim()) return json(res, 400, { error: 'empty task' });
       const r = await route(dept, String(text).trim());
       // needsOk is the router's judgement and it is kept: a task typed into the bar that sends, posts or
       // pays now drafts first and waits for the OK, exactly like a routine does
-      const task = { id: nid(), dept, agent: r.agent, title: r.title, text: String(text).trim(), plan: r.plan, eta: r.eta, why: r.why, needsOk: r.needsOk, state: 'next', addedAt: Date.now(), by: 'you', model: normModel(model) || undefined, effort: normEffort(effort) || undefined }; // model/effort: set on this task (beats routine, agent, office)
-      const list = load(); list.push(task); save(list);
-      console.log(`+ ${task.id} → ${task.agent}: ${task.title}${task.needsOk ? ' (drafts first, waits for your OK)' : ''}`);
+      const task = newTask({ dept, agent: r.agent, title: r.title, text: String(text).trim(), plan: r.plan, why: r.why, needsOk: r.needsOk, after: Array.isArray(after) ? after.map(String) : [], goal: goal ? String(goal).slice(0, 80) : undefined, model: normModel(model) || undefined, effort: normEffort(effort) || undefined }); // model/effort: set on this task (beats routine, agent, office)
+      task.eta = r.eta;
+      console.log(`+ ${task.id} → ${task.agent}: ${task.title}${task.needsOk ? ' (drafts first, waits for your OK)' : ''}${task.state === 'blocked' ? ' (' + task.blockedReason + ')' : ''}`);
       return json(res, 200, task);
+    }
+    if (url.pathname === '/api/pending' && req.method === 'GET') return json(res, 200, coord.pending(load(), { paused: pausedNow(), agentName })); // everything waiting on the owner, as decisions
+    if (url.pathname === '/api/office/pause' && req.method === 'POST') { const b = await body(req); return json(res, 200, { ok: true, paused: setPaused(true, b.why) }); }
+    if (url.pathname === '/api/office/resume' && req.method === 'POST') { return json(res, 200, { ok: true, paused: setPaused(false) }); }
+    const own = url.pathname.match(/^\/api\/tasks\/([^/]+)\/(cancel|reassign|checked|answer|handoff)$/);
+    if (own && req.method === 'POST') {
+      const b = await body(req);
+      if (own[2] === 'handoff') { // the owner (or Claude Code) hands a finished piece of work on to another agent
+        const up = load().find(t => t.id === own[1]); if (!up) return json(res, 404, { error: 'no such task' });
+        const a = AGENTS.find(x => x.id === b.agent); if (!a) return json(res, 400, { error: 'no such agent' });
+        const text = String(b.text || '').trim(); if (!text) return json(res, 400, { error: 'say what the next agent must do' });
+        const t = newTask({ dept: a.department, agent: a.id, title: text.split(/(?<=[.!?])\s/)[0].slice(0, 90), text, needsOk: typeof b.needsOk === 'boolean' ? b.needsOk : routines.guessNeedsOk(text), after: [up.id], goal: up.goal || up.id, by: 'handoff', why: `handed on from "${up.title}"` });
+        return json(res, 200, t);
+      }
+      const r = ownerAction(own[1], own[2], b);
+      return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : { ok: true, ...r });
     }
     const m = url.pathname.match(/^\/api\/tasks\/([^/]+)(?:\/(run|revise|approve|reject))?$/);
     const learnFrom = (t, note) => { // a correction becomes a lesson only when the rework it asked for actually happened

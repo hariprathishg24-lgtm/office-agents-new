@@ -36,6 +36,19 @@ try {
     if (n !== 1) throw new Error(`${n} sends`);
     return '1 send';
   });
+  await step('a blocked task shows as blocked and the page does not start it', async () => {
+    const up = (await office.api('POST', '/api/tasks', { dept: 'ops', text: 'list the drill firms' })).body;
+    await office.api('POST', '/api/office/pause', { why: 'drill' }); // keep the prerequisite unfinished while the page looks
+    const down = (await office.api('POST', '/api/tasks', { dept: 'ops', text: 'list the drill owners', after: [up.id] })).body;
+    await page.waitForFunction(id => window.CC.tasks.tasks.find(x => x.sid === id)?.state === 'blocked', down.id, { timeout: 20000 });
+    await sleep(8000);
+    const st = (await office.task(down.id)).state;
+    if (st !== 'blocked') throw new Error('server state ' + st);
+    const label = await page.evaluate(() => [...document.querySelectorAll('.tp-st.blocked')].length);
+    await office.api('POST', '/api/office/resume');
+    await page.waitForFunction(id => window.CC.tasks.tasks.find(x => x.sid === id)?.state === 'done', down.id, { timeout: 30000 }).catch(async e => { const pg = await page.evaluate(([u, d]) => window.CC.tasks.tasks.filter(x => x.sid === u || x.sid === d).map(x => ({ sid: x.sid, state: x.state, err: x.error, res: String(x.result || '').slice(0, 80), running: x.running, ready: x.ready })), [up.id, down.id]); throw new Error(JSON.stringify({ page: pg, server: [await office.task(up.id), await office.task(down.id)].map(t => ({ state: t.state, error: t.error, history: t.history })) })); });
+    return `blocked on the page (${label} blocked chip${label === 1 ? '' : 's'}), then ran after its prerequisite`;
+  });
   await step('no page errors', async () => { if (errs.length) throw new Error(errs[0]); });
 } catch { failed = true; }
 finally { if (browser) await browser.close(); await office.stop(); s.cleanup(); }

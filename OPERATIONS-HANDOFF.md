@@ -115,3 +115,14 @@ Redeployed with nothing running: old launcher stopped first (cmd reads a batch f
 ## Still owner-only
 
 Unchanged from the pass above: seat reviews, acquisition limits and research budget, QA's PASS/FAIL format, autostart, and the 3 drafts. The new slots (`partnerRates`, `partnerMargin`, `paymentTerms`, task budgets and deadlines) are the owner's numbers — they are written as unset and stay that way until the owner gives them.
+
+## Later that evening — seats read their contracts (17–18 Sep 2026)
+
+- **The gap:** a capability contract was documentation only. Nothing gave it to the seat, so "contracted" still meant the agent worked from its job title. QA answered "VERDICT: CONDITIONAL PASS" (its contract allows PASS or FAIL only) and the CEO seat ignored the section headings its contract requires. Seats now receive their contract with their brief and skills (`coverage.contractText`, `agentBrief` in `serve.mjs`), with a test that it arrives and that a seat without one is unchanged.
+- **Live fixture results (real Claude, 17 Sep evening, ~$2.50 in total):**
+  - QA **3/3** (was 1/3) · CEO **3/3** (was 1/3) · INSTAGRAM ORGANIC **3/3** (was 2/3). Answers are in `brain/Agents Office/fixtures/<id>/results-*.json`.
+  - Three of the earlier failures were the checks, not the seats, and were corrected: IGGY wrote "nothing posted" where the check only accepted "published"; the CEO case forbade the words "on track" in a sentence refusing to claim it; the "claims no past work" check counted a post asking the reader "where did your last 10 clients come from?" as a claim about ours.
+  - QA's normal case now hands over the prospect record and the `REASON:` line the acquisition workflow really produces. Before that it failed a well-formed draft for an unverifiable claim — which was QA being right and the fixture being unfair.
+- **Not re-run yet:** the nine other first-client seats last ran *before* seats were given their contracts, so their passing runs are evidence for the older behaviour. Re-run `node fixtures.mjs first-client` when the session window is fresh (about 3% of a session a seat; it was at 38% after tonight's runs).
+- **Starting the office from an agent session does not stick.** A server started from a tool call (`Start-Process`, or `Win32_Process.Create`) is killed with SIGHUP when that session's process tree is cleaned up — it happened twice tonight, roughly 40 minutes each time. Start it through Task Scheduler instead: register a task with no trigger, `Start-ScheduledTask`, then unregister it — the running office survives and no logon task is added. The owner's own `start-office.cmd` window, or `scripts/install-autostart.ps1`, is still the proper way to keep it up.
+- Live office now pid 48768, 27 tasks, 3 approvals waiting, `readiness.requireForOutbound: contracted`. `npm test` **97/97**, `node check.mjs` **38/38**, browser drill **7/7**.

@@ -82,6 +82,8 @@ Follow `template.md` beside this file, section for section.
 
 A brief or a skill says how an agent should work. It does not show the agent can do the job. `npm run coverage` reports every seat's level: **generic** (only the house style), **briefed** (a brief or a department/agent skill exists), **contracted** (a complete capability contract) or **tested** (contract + three fixture cases + a passing review of that exact contract). It writes the full list, with each seat's gaps, to `data/coverage.json`. The first-client seats (`pros enzo ilm lexi folo cmail piper qa dlead pco`) come first.
 
+The contract is not only a record: the seat is given it before every task and chat turn, with its brief and skills. Write it as instructions that seat can follow, and keep the Output section exact — it is what the seat's answers are shaped by, and what its fixtures check.
+
 - **Contract:** `<brain>/Agents Office/contracts/<id>.md` with these `##` sections, none empty: Purpose · Triggers · Required inputs · Boundaries · Allowed tools · Procedure · Output · Quality rubric · Source standards · Escalate when · Worked example. Build it from the owner's own material (their SOPs, approved notes, a skill they signed off). Where something is not established, write that, and never invent the owner's process.
 - **Fixtures:** `<brain>/Agents Office/fixtures/<id>/normal.md`, `missing-input.md`, `misleading-input.md`, each a task written as the owner would type it, plus what a good answer must and must not do.
 - **Review:** `fixtures/<id>/review.json` → `{ "contractHash": "<first 16 hex of sha256 of the contract file>", "passed": true, "reviewedBy": "owner", "reviewedAt": "<date>", "notes": "…" }`. Only the owner marks a review passed. Editing the contract voids the review.

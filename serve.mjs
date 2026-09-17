@@ -355,7 +355,7 @@ async function run(task, feedback, mode, { onToolUse } = {}) {
     `If part of this is another agent's job, end with up to ${coord.MAX_HANDOFFS} lines "HANDOFF → <agent id>: <what they must do, with the facts they need>"; that work starts after yours is finished (for a draft, after the owner approves it). If you need a decision or a fact only the owner has, add a line "NEEDS OWNER: <the question>" instead of guessing. These lines are notes to the office and are never sent to anyone. Agent ids: ${AGENTS.filter(x => x.id !== a.id).map(x => `${x.id} (${x.name.toLowerCase()})`).join(', ')}.\n\n` +
     `${mcp.promptText(a.tools)}\n\n${NOTES_HEADER}\n\n${businessContext(index)}\n\nNOTES YOU READ FOR THIS TASK\n${contextText(index, read)}`;
   const routineLine = task.routine ? `\nThis is a routine (${task.when}): it runs on the office's own clock and the owner is not at the keyboard. It is now ${new Date().toLocaleString([], { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })}${task.late ? `; this run is late, it was due ${new Date(task.due).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}` : ''}. Do the work for now.` : '';
-  const modeLine = mode === 'draft' ? '\nPrepare everything, but send, post, pay or change NOTHING outside this machine: the owner reads this first and approves it. End with one line saying exactly what will go out when approved (or that nothing needs to).'
+  const modeLine = mode === 'draft' ? '\nPrepare everything, but send, post, pay or change NOTHING outside this machine: the owner reads this first and approves it. End with one line saying exactly what will go out when approved. If it turns out nothing needs to go out (nothing found, nobody to contact), make the FIRST line exactly "NOTHING TO SEND", then say briefly what you checked — that is a finished report, not something for the owner to approve.'
     : mode === 'approve' ? `\nThe owner has APPROVED the draft below. Carry out the outbound step now, exactly as drafted, with your tools (send, post, update). If a tool you need is not connected, say so and show what you would have sent. Then report in one short section: what went out, to whom, and anything that did not. Do not hand off or ask anything in this step.\nApproved draft:\n${withoutControlLines(task.approval.draft)}`
     : '\nThis task was judged read-only: read, research and report. Send, post, pay, delete or change NOTHING outside this machine. If doing it properly needs an outbound step, draft that step and say it needs the owner\'s OK.';
   const user = `Task: ${task.title}\nOwner's request: ${task.text}` + (task.plan?.length ? `\nAgreed plan: ${task.plan.join(' → ')}` : '') + routineLine + modeLine +
@@ -432,8 +432,18 @@ const agentName = id => AGENTS.find(a => a.id === id)?.name || id;
 // routine-driven runs go one at a time, so a burst of catch-ups after a long sleep does not spawn five Claude processes at once
 let queue = Promise.resolve();
 const enqueue = fn => { const p = queue.then(fn, fn); queue = p.catch(() => {}); return p; };
+// A routine has at most one open run. RUN NOW pressed seven times used to start seven Claude runs of
+// the same inbox check (17 Sep 2026); now it answers with the run already open. The clock skips a
+// due time while the last run is unfinished or its draft still waits for the owner, rather than
+// stacking a second draft of the same job on top of the first.
+const OPEN_STATES = ['next', 'blocked', 'doing', 'review', 'waiting'];
 function fire(r, { due = Date.now(), late = false, by = 'routine' } = {}) { // the routine becomes a task and runs here, page or no page
-  const task = { id: nid(), dept: r.dept, agent: r.agent, title: r.title, text: r.text, plan: r.plan || [], eta: 15, why: '', state: 'next', addedAt: Date.now(), by, routine: r.id, when: r.desc || describe(r.when), needsOk: r.needsOk, due, late, routineModel: r.model || undefined, routineEffort: r.effort || undefined, because: `routine ${r.id} fired${late ? ' late' : ''}` };
+  const open = load().find(t => t.routine === r.id && OPEN_STATES.includes(t.state));
+  if (open) {
+    if (by === 'routine') { routines.advance(RSTATE, r, Date.now(), open.id, late); routines.saveState(DATA, RSTATE); console.log(`⏭ ${r.id} skipped: its last run ${open.id} is still ${open.state === 'waiting' ? 'waiting for your OK' : open.state}`); }
+    return { ...open, existing: true };
+  }
+  const task ={ id: nid(), dept: r.dept, agent: r.agent, title: r.title, text: r.text, plan: r.plan || [], eta: 15, why: '', state: 'next', addedAt: Date.now(), by, routine: r.id, when: r.desc || describe(r.when), needsOk: r.needsOk, due, late, routineModel: r.model || undefined, routineEffort: r.effort || undefined, because: `routine ${r.id} fired${late ? ' late' : ''}` };
   const list = load(); list.push(task); save(list);
   routines.advance(RSTATE, r, Date.now(), task.id, late); routines.saveState(DATA, RSTATE);
   console.log(`⏱ ${task.id} → ${task.agent}: ${task.title}${late ? ' (LATE · was due ' + new Date(due).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ')' : ''}`);
@@ -561,7 +571,10 @@ async function execute(id, attemptId, { feedback } = {}) {
   // the difference between "nothing went out" and "it may have gone out"
   const onToolUse = at.mode === 'approve' ? () => { if (sendMarked) return; sendMarked = true; patchTask(id, t => { if (t.attempt !== attemptId) return false; t.sendStartedAt = Date.now(); }); } : null;
   try { out = await run(snap, feedback, at.mode, { onToolUse }); } catch (e) { failure = e; }
-  if (out && at.mode === 'draft') review = await reviewDraft(snap, out.result, attemptId);
+  // "NOTHING TO SEND" on the first line: the agent looked and there is nothing outbound — a finished
+  // report, never an approval request that makes an empty check look like work to send
+  const noop = !!(out && at.mode === 'draft' && /^[\s#*_>]*NOTHING TO SEND\b/i.test(out.result));
+  if (out && at.mode === 'draft' && !noop) review = await reviewDraft(snap, out.result, attemptId);
 
   const list = load(); const t = list.find(x => x.id === id);
   if (!t) { console.log(`  ${id} was deleted while it ran — its result was dropped`); return null; }
@@ -573,6 +586,7 @@ async function execute(id, attemptId, { feedback } = {}) {
     Object.assign(t, { read: out.read, sources: out.sources, tools: [...new Set([...(t.tools || []), ...out.tools])], used: [...new Set([...(t.used || []), ...out.used])], blocked: out.blocked, skills: out.skills, error: false, modelUsed: out.modelUsed, modelFrom: out.modelFrom, modelId: out.modelId, effortUsed: out.effortUsed, effortFrom: out.effortFrom });
     delete t.lastError;
     if (at.mode === 'approve') { t.result = t.approval.draft + '\n\n---\nAFTER YOUR OK\n' + out.result; t.approved = true; t.approvedAt = t.approval.approvedAt; t.state = 'done'; t.doneAt = Date.now(); t.because = 'sent after the owner approved'; made = followUps(list, t, t.approval.draft); }
+    else if (noop) { Object.assign(t, { result: out.result, state: 'done', doneAt: Date.now(), noop: true, because: 'checked: nothing to send' }); made = followUps(list, t, out.result); }
     else if (at.mode === 'draft') {
       Object.assign(t, { result: out.result, draft: out.result, draftHash: hash(out.result), waitingAt: Date.now(), state: 'waiting', because: review ? `drafted; ${agentName(review.agent)}: ${review.verdict}` : 'drafted' });
       if (review) t.review = review; else delete t.review;
@@ -774,7 +788,7 @@ async function routinesChat(a, text) {
     const list = loadRoutines(); const words = cmd[2].replace(/\s+(routine|one)$/i, ''); const r = routines.matchRoutine(list, dept, words);
     if (!r) return { reply: (list.some(x => x.dept === dept) ? 'Which one? ' : '') + routines.listText(list, dept, AGENTS) };
     const verb = cmd[1].toLowerCase();
-    if (verb === 'run') { const task = fire(r, { by: 'you' }); return { reply: `Running "${r.title}" now — ${r.agent === a.id ? 'I have it' : agentName(r.agent) + ' has it'}. It lands in the panel${r.needsOk ? ' and waits for your OK before anything is sent' : ''}.`, task }; }
+    if (verb === 'run') { const task = fire(r, { by: 'you' }); if (task.existing) return { reply: `"${r.title}" is already ${task.state === 'waiting' ? 'waiting for your OK' : 'running'} — I did not start it again.`, task }; return { reply: `Running "${r.title}" now — ${r.agent === a.id ? 'I have it' : agentName(r.agent) + ' has it'}. It lands in the panel${r.needsOk ? ' and waits for your OK before anything is sent' : ''}.`, task }; }
     if (/pause|stop/.test(verb)) { editRoutine(r.id, { paused: true }); return { reply: `Paused "${r.title}". It stays on the timetable; say "resume ${r.title.toLowerCase()}" to start it again.` }; }
     if (/resume|start|unpause/.test(verb)) { const n = editRoutine(r.id, { paused: false }); return { reply: `"${r.title}" is back on — next ${untilText(n.nextAt)}.` }; }
     if (/delete|remove/.test(verb)) { removeRoutine(r.id); return { reply: `Deleted "${r.title}". It is off the timetable.` }; }

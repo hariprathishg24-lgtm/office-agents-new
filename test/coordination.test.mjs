@@ -2,6 +2,8 @@
 // questions, cancel / reassign / reconcile, and a pause that stops everything new.   npm test
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import { scratch, startOffice, sleep } from './helpers.mjs';
 import * as coord from '../coordinator.mjs';
 
@@ -27,6 +29,37 @@ describe('coordinator rules', () => {
     coord.stampHistory(list, [{ id: 'x', state: 'next' }], 5);
     assert.deepEqual(list[0].history, [{ at: 5, from: 'next', to: 'doing', why: 'run (attempt 1)' }]);
     assert.equal(list[0].because, undefined);
+  });
+});
+
+describe('routines do not pile up', () => {
+  let s, office;
+  before(async () => {
+    s = scratch('pileup');
+    fs.writeFileSync(path.join(s.brain, 'Agents Office', 'routines.json'), JSON.stringify({ routines: [
+      { id: 'inbox-check', dept: 'sales', agent: 'ilm', title: 'Qualify any inbound enquiry', text: 'send replies to enquiries [fake:wait=600]', when: { kind: 'weekdays', at: '08:45' }, needsOk: true, paused: false },
+      { id: 'empty-check', dept: 'sales', agent: 'ilm', title: 'Draft replies to enquiries', text: 'send replies to enquiries [fake:nothing]', when: { kind: 'weekdays', at: '08:46' }, needsOk: true, paused: false },
+    ] }));
+    office = await startOffice({ brain: s.brain, data: s.data });
+  });
+  after(async () => { await office.stop(); s.cleanup(); });
+
+  test('RUN NOW pressed repeatedly starts one run and answers with it', async () => {
+    const replies = [];
+    for (let i = 0; i < 5; i++) replies.push((await office.api('POST', '/api/routines/inbox-check/run')).body.task);
+    assert.equal(new Set(replies.map(t => t.id)).size, 1, 'one task for five presses');
+    await office.until(replies[0].id, t => t.state === 'waiting');
+    const again = (await office.api('POST', '/api/routines/inbox-check/run')).body.task;
+    assert.equal(again.id, replies[0].id, 'a draft still waiting for the OK is not drafted again');
+    assert.equal(office.calls().filter(c => c.mode === 'draft' && c.request.includes('replies to enquiries [fake:wait')).length, 1);
+  });
+
+  test('a draft run that finds nothing to send is a finished report, not an approval request', async () => {
+    const t = (await office.api('POST', '/api/routines/empty-check/run')).body.task;
+    const done = await office.until(t.id, x => x.state === 'done');
+    assert.equal(done.noop, true); assert.equal(done.error, false); assert.equal(done.review, undefined);
+    assert.ok(!office.calls().some(c => c.mode === 'review' && c.request.includes('[fake:nothing]')), 'no reviewer call for an empty check');
+    assert.ok(!(await office.api('GET', '/api/pending')).body.items.some(i => i.id === t.id));
   });
 });
 

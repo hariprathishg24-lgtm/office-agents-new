@@ -45,6 +45,7 @@ process.stdin.on('end', async () => {
   if (marker[1] === 'error') { emit({ type: 'result', subtype: 'error_during_execution', is_error: true, result: 'API Error: overloaded' }); return process.exit(0); }
   if (marker[1] === 'exit') { emit({ type: 'assistant', message: { content: [{ type: 'text', text: 'half a draft' }] } }); process.stderr.write('boom\n'); return process.exit(3); }
   if (marker[1] === 'empty') return process.exit(0);
+  if (marker[1] === 'nothing' && mode === 'draft') { emit({ type: 'result', subtype: 'success', is_error: false, result: '**NOTHING TO SEND**\nChecked the inbox: no enquiries.' }); return process.exit(0); }
   if (mode === 'approve') {
     if (marker[1] === 'prefail') { process.stderr.write('auth expired\n'); return process.exit(1); }
     emit({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 's1', name: 'mcp__claude_ai_Gmail__send_message' }] } });

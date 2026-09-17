@@ -49,3 +49,41 @@ node test/browser-drill.mjs
 ```
 
 For deliberate real operation, `start-office.cmd` starts the office with crash backoff; it can dispatch the five unpaused routines. `/ops` provides pause/resume and Stop. Stop uses exit code 3 so the launcher does not restart it. Autostart installation remains a separate owner decision. No state schema migration was introduced in this pass. Keep existing task/brain records and approval history when rolling code back, and reconcile unknown external outcomes before any retry. An interrupted lock-recovery marker requires inspection rather than blind deletion.
+
+---
+
+# Later pass — 17 September 2026, 15:00–16:30 (Claude)
+
+Picked up the tree above (the ChatGPT pass) without reverting anything, reviewed it, and committed it together with the remaining handoff items on `reliability-handoff`.
+
+## Code changes
+
+- An approval records the draft's `TO:` recipient, and the send is held to that recipient. Agents receive only the connectors wired to their department. Read-only server work retries network and usage failures with backoff (1 min, then 4 min, at most 3 attempts in total). Sends and login failures never retry.
+- Correction memory: a correction is a *proposed* rule until the owner repeats it or confirms it (`POST /api/lessons/<id>/confirm`, owner only). A correction with the opposite sense is held as a conflict. Rules older than 180 days are flagged. Pending decisions list both.
+- `/ops` shows price conflicts (a current note quoting an offer price that is not on the offer ladder) and seat readiness. Task sources record a note's effective date.
+- A configured `claudePath`/`AO_CLAUDE` that does not exist is a clear spawn failure, never a silent fallback to another `claude`. A restart shorter than the heartbeat save interval is no longer reported as downtime.
+- Fixture runner: a fresh brain copy and office per case (one shared office let a case read an earlier case's filed note). `expect` may list alternatives (`waiting|done`). `advisory` checks are reported without failing a case.
+- Verification: `npm test` **80/80**, `node check.mjs` **38/38** (with `AO_BUILD_LOCAL_FILES=1`), browser drill passed. The live office was redeployed (pid 4768) with nothing running at the time. Connectors come from `data/mcp-cache.json`.
+
+## Live fixture runs (real Claude, plan usage 19% → 77%)
+
+- The 11:02 run hit the session limit on every case; its results are kept as `aborted-results-*` and are not evidence.
+- Run 1 (fixtures v1) passed SALES LEAD, DELIVERY LEAD and PROJECT CO-ORDINATOR. Most other failures came from the fixtures: the tasks called the firm "made-up, not a real company", so agents correctly refused.
+- Fixtures v2 frame each case as a practice run from given details. Run 2 passed PROPOSALS, PROSPECTOR, INBOUND LEADS MANAGER, CLIENT EMAILS, FOLLOW UPS and LEAD ENRICHER on every required check. **9 of 10 first-client seats pass.** Answers are saved in `brain/Agents Office/fixtures/<id>/results-*.json`.
+- **QA failed 2 of 3, both real:**
+  - Asked as a seat (not as the automatic reviewer), it answered "VERDICT: Hold" instead of PASS or FAIL. The format lives only in the reviewer prompt and the draft contract.
+  - With no draft given, it reviewed an old hypothetical "Northwind Labs" proposal from the brain.
+- Seven such practice and test deliverables are now marked SUPERSEDED (brain commit `60e0b58`), so retrieval no longer offers them. QA has not been re-run since.
+- Seen in run 1: asked for a $4,000 "friend" price, PROPOSALS put it in the draft with a policy flag, and the QA reviewer failed it. In run 2 it priced from the ladder instead.
+- INSTAGRAM ORGANIC and CEO fixtures (ChatGPT's) have not been run.
+
+## Still owner-only
+
+1. Review each seat's saved answers; only `POST /api/coverage/<id>/review {"passed", "notes", "approvedBy": "owner"}` makes a seat *tested* (0 today).
+2. Acquisition limits and `"active"` in `brain/Agents Office/acquisition.json`; research budget in `research.json`.
+3. Whether QA's seat brief should carry the PASS/FAIL format (it is in the draft contract, not yet in QA's brief).
+4. Autostart (`scripts/install-autostart.ps1`), Gate C pilot, the 3 drafts waiting for approval.
+
+## Next for any agent
+
+Re-run `node fixtures.mjs qa`, then `iggy` and `ceo`, when plan usage is low: each seat costs about 3% of a session. Stop above ~60% on a day with routines due. Never write `review.json` yourself.

@@ -238,16 +238,30 @@ describe('recovery after a restart', () => {
     const s = scratch('real');
     fs.copyFileSync(real, path.join(s.data, 'tasks.json')); // a copy: the real file is only read
     const before = JSON.parse(fs.readFileSync(real, 'utf8'));
+    // A store saved while the office was running holds work mid-flight — the owner's real file has
+    // carried an interrupted routine run since the SIGHUP of 18 Sep. Boot reconciles those, which is
+    // the recovery contract above; settled work must still come back untouched, and nothing may send.
+    const inFlight = b => ['doing', 'review', 'next', 'blocked'].includes(b.state);
+    const NL = String.fromCharCode(10);
+    const firstLine = text => String(text || '').split(NL)[0].trimEnd();
     const office = await startOffice({ brain: s.brain, data: s.data });
     try {
+      for (const b of before.filter(inFlight)) await office.until(b.id, x => x.attempt !== b.attempt || !['doing', 'review'].includes(x.state));
       const after = await office.tasks();
       assert.equal(after.length, before.length);
       for (const b of before) {
         const a = after.find(x => x.id === b.id);
         if (b.state === 'waiting') { assert.equal(a.state, 'waiting'); assert.equal(a.draft, b.draft); assert.equal(a.draftHash, hash(b.draft)); }
+        else if (inFlight(b)) {
+          assert.deepEqual([a.id, a.title, a.text, a.agent], [b.id, b.title, b.text, b.agent], `${b.id} lost its identity in recovery`);
+          if (b.attempt) assert.equal((a.attempts || []).find(x => x.id === b.attempt)?.outcome, 'interrupted', `${b.id}: the interrupted attempt is closed, not left claimed`);
+          assert.notEqual(a.attempt, b.attempt, `${b.id} still holds the attempt it was interrupted in`);
+        }
         else assert.deepEqual(a, b, `${b.id} changed`);
       }
-      assert.equal(office.calls().length, 0, 'booting on the real task list ran nothing');
+      assert.equal(office.calls().filter(c => c.mode === 'SEND').length, 0, 'booting on the real task list sent nothing');
+      const restartable = new Set(before.filter(inFlight).map(b => firstLine(b.text)));
+      for (const c of office.calls()) assert.ok(c.mode === 'router' || restartable.has(c.request), `boot ran settled work again: ${c.request.slice(0, 60)}`);
     } finally { await office.stop(); s.cleanup(); }
   });
 });

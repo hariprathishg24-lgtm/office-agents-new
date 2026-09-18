@@ -127,3 +127,87 @@ Unchanged from the pass above: seat reviews, acquisition limits and research bud
 - **Starting the office from an agent session does not stick.** A server started from a tool call (`Start-Process`, or `Win32_Process.Create`) is killed with SIGHUP when that session's process tree is cleaned up — it happened twice tonight, roughly 40 minutes each time. Start it through Task Scheduler instead, and leave the registration alone while it runs: unregistering a task terminates the instance it started (that killed it a third time). There is now an on-demand task **AO-office-manual-start** with no trigger — it never fires by itself, and Start-ScheduledTask on it brings the office up detached. Delete it whenever the office is not running, or replace it with the real logon task from `scripts/install-autostart.ps1`. The owner's own `start-office.cmd` window, or `scripts/install-autostart.ps1`, is still the proper way to keep it up.
 - **An office with no console used to stop itself after about fifteen seconds** (SIGHUP from the console Windows created for ).  now passes windowsHide, so the CLI gets its own hidden console. This is why a Scheduled Task start kept dying, and it would have hit  too.
 - Live office now pid 48768, 27 tasks, 3 approvals waiting, `readiness.requireForOutbound: contracted`. `npm test` **97/97**, `node check.mjs` **38/38**, browser drill **7/7**.
+
+# Later pass — 18 September 2026, evening (Claude)
+
+Picked the tree up clean on `reliability-handoff` (nothing uncommitted, `fb6c7dd` at the head) and
+closed the two items the previous pass left for the next agent: the nine first-client seats whose
+fixture evidence predated seats receiving their contracts, and same-day evidence for every gate an
+agent can reach. No owner decision was made, no draft approved, no routine activated, no live office
+started, and no outbound action of any kind occurred.
+
+## Changed files, and why each was needed
+
+- **`test/reliability.test.mjs`** — `the owner's saved tasks survive the new code unchanged` was
+  failing. Not a product defect: the owner's real `data/tasks.json` has held `mu6xzoop45hs` in
+  `doing` since the SIGHUP of 18 Sep 18:06, and `recoverTasks()` correctly closes the interrupted
+  attempt and requeues the read-only task. The test asserted the real store boots byte-identical and
+  runs nothing, which stopped being true the moment a live run was interrupted. It now asserts what
+  actually matters — settled work is never rewritten, nothing is sent, and no already-finished task
+  is run again — while allowing mid-flight work to be reconciled.
+- **`fixtures.mjs`** — the `a draft claims nothing was sent` check read its own negation. PROSPECTOR
+  wrote "No client note was created, nothing was searched, and nothing has been sent", which is
+  correct in every respect, and the bare `has been sent` branch scored it as a claim that something
+  had gone out. Negated mentions are now dropped before the check looks for a claim. The test that
+  covers this check (`fixture checks catch ... a claimed send ...`) still passes, so a real claimed
+  send is still caught.
+
+`src/braingraph.js` was rewritten by the build with only its date stamp changed (same 55 notes, 54
+linked, 158 links) and was restored rather than committed.
+
+## Verification, with exact results
+
+- `npm test` — **97 passed, 0 failed**, 26 suites.
+- `node check.mjs` with `AO_BUILD_LOCAL_FILES=1 CHECK_LIVE=0` — **38/38**, including a rebuilt bundle
+  and isolated server smoke checks. `live` skipped by design.
+- `node test/browser-drill.mjs` — **7/7**: approval held, one send on approve, blocked prerequisite
+  then ordered completion, desktop 1440px and phone 390px with 0px horizontal overflow, pause and
+  resume from a phone, an unproven seat refused then sent on the owner's reason, no page errors.
+  These are simulated connector results, not delivery evidence.
+- **Live fixtures, real Claude, all nine seats re-run after contracts reach seats — 9/9 at 3/3**,
+  $4.29 in total: lexi $0.52, enzo $0.41, ilm $0.52, pros $0.29 (re-run), piper $0.62, folo $0.43,
+  cmail $0.52, dlead $0.53, pco $0.44. With QA, CEO and IGGY from 17 Sep, **all twelve contracted
+  seats now have passing fixture evidence produced by the current code path.** Plan usage went 4% to
+  44% of the session window; week ended at 63%.
+
+## Schema and migration
+
+None. No state schema changed, no migration was written, and no stored task, routine or brain record
+was edited. Task IDs, approval history and external-action evidence are untouched.
+
+## Starting, stopping, and what is running
+
+The office is **not running**. It took a SIGHUP at 18:06 on 18 Sep after the machine slept for 378
+minutes, with `mu6xzoop45hs` (CEO weekly) mid-run; that task is stored as `doing` and will be
+reconciled and requeued on the next start. Earlier the same day `mu6fjyrcmdrk` failed with
+`ENOTFOUND` after two backoff retries and kept its previous result — a network fault, honestly
+reported. Start through `start-office.cmd` or the trigger-less `AO-office-manual-start` task; stop
+through `POST /api/office/stop` or Stop on `/ops`. Autostart remains **NOT REGISTERED**.
+
+Routines: **five unpaused, two paused**, unchanged. Starting the office can fire the five and catch
+up missed runs, so restart timing stays an owner decision.
+
+## Known limitations
+
+Seats are **0 tested** — twelve are contracted with passing fixtures, and only a passing owner review
+of the current contract makes a seat tested. Gate C has not begun. Acquisition and research are both
+inactive and refuse to create work until their numbers are set. Fixture passes are evidence that the
+implementation and the contracts hold, not that business quality is proven.
+
+Two of the three waiting drafts are legacy no-ops: `mu4ybp1lzrs0` (pros) and `mu4yiaq6vr5p` (ilm)
+were created at 08:47–08:49 on 17 Sep, about twenty minutes before `eae7c6f` began filing
+nothing-to-send drafts as finished reports, and they carry no `NOTHING TO SEND` first line for the
+detector to catch. Because `waiting` is an open state, each has been skipping its routine —
+`outbound-first-touch` and `inbound-qualify` have not fired since 17 Sep. Cancelling them
+(`POST /api/tasks/<id>/cancel`) costs no Claude run and frees both routines; approving them would
+spend a run carrying out an outbound step with `recipient: null` and nothing to send. No migration
+was written to reclassify them, because deciding from the prose that a draft is safe to close is the
+owner's judgement. The third, `mu4ybsp45ila` (iggy), is four real Instagram posts and deserves a read.
+
+## Decisions still needed
+
+Unchanged and all owner-only: the four acquisition limits and `active`; the research budget and
+`active`; reviews of the twelve contracted seats; the three waiting drafts; whether QA's brief carries
+the PASS/FAIL format; autostart; the Gate C pilot scope; and restart timing. Apollo.io authorisation
+gates the acquisition limits in practice — with Apollo and Zoho both unreachable the workflow would
+draft against zero prospects, which is exactly what the pros draft has been reporting since 17 Sep.

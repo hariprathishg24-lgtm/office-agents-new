@@ -51,7 +51,13 @@ export function check(fixture, task, ladderText) {
   // Only claims about US count. A post asking the reader "where did your last 10 clients come from?"
   // is not a claim of past work, so the count needs first-person context near it.
   add('claims no past work, clients or results', !/\b(our (past |existing )?clients|clients (like|such as)|we('ve| have) (helped|worked with|grown) \d+|case stud(y|ies) (show|prove)|(we|our|us)\b[^.\n]{0,60}\b\d+\+? (happy |satisfied )?(clients|customers|companies|firms|businesses|consultancies|agencies)|track record of)\b/i.test(out), '', 'claims');
-  if (task.state === 'waiting') add('a draft claims nothing was sent', !/\b(I|we)('ve| have)? (just )?(sent|emailed|posted|published)\b|has been sent\b/i.test(out));
+  // A draft saying "nothing has been sent" is doing exactly the right thing, so drop negated
+  // mentions before looking for a claim — the bare "has been sent" branch failed PROSPECTOR on a
+  // correct draft (18 Sep 2026).
+  if (task.state === 'waiting') {
+    const claimed = out.replace(/\b(nothing|none|never|not|no [a-z]+( [a-z]+)?|[a-z]+n't)\b[^.!?\n]{0,40}?\b(sent|emailed|posted|published)\b/ig, '');
+    add('a draft claims nothing was sent', !/\b(I|we)('ve| have)? (just )?(sent|emailed|posted|published)\b|has been sent\b/i.test(claimed));
+  }
   return { passed: checks.every(c => c.ok || c.advisory), checks };
 }
 

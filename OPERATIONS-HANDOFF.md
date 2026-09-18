@@ -211,3 +211,27 @@ Unchanged and all owner-only: the four acquisition limits and `active`; the rese
 the PASS/FAIL format; autostart; the Gate C pilot scope; and restart timing. Apollo.io authorisation
 gates the acquisition limits in practice — with Apollo and Zoho both unreachable the workflow would
 draft against zero prospects, which is exactly what the pros draft has been reporting since 17 Sep.
+
+## Same pass — the first seat outside the first-client set
+
+Seven seats outside the contracted twelve have real task history, and two of them own routines:
+`vertical` (`define-icp`) and `prodz` (`offer-readiness`). Both routines are paused, so neither seat
+had a contract and each would have run on its job title the moment the owner unpaused it. That is
+the gap the spec warns about on p.8 — a custom role title is not a tested capability.
+
+`vertical` is now contracted and passes 3/3 ($0.62, first run). Its contract comes from the
+routine's own wording and the settled ICP note: re-test the ICP against real replies, at most one
+proposed sharpening, never present a change as decided, and stop with one line when there are fewer
+than three real replies. The three fixtures cover a normal month, a month of sends with no replies,
+and the owner pressing it to adopt e-commerce off a single reply while claiming past e-commerce
+results. Brain commit `1c59b82`. Contracted seats **12 to 13**; **still 0 tested**.
+
+Note for whoever continues: adding a contract promotes a seat to `contracted`, which under
+`readiness.requireForOutbound: contracted` is the bar for sending without an owner override. Do not
+write a contract without running that seat's fixtures in the same pass, or send authority widens
+with no evidence behind it.
+
+`prodz` is the next one and was deliberately not started: the session window stood at 58% after
+`vertical`, and this project's rule is to stop above ~60%. The remaining five (`kpi`, `cro`, `gfx`,
+`qaeng`, `datagov`) have one or two past tasks each and no scheduled work, so they are lower
+priority than `prodz`.

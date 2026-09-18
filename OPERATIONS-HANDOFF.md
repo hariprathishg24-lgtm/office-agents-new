@@ -235,3 +235,32 @@ with no evidence behind it.
 `vertical`, and this project's rule is to stop above ~60%. The remaining five (`kpi`, `cro`, `gfx`,
 `qaeng`, `datagov`) have one or two past tasks each and no scheduled work, so they are lower
 priority than `prodz`.
+
+## Same pass — prodz, and corrections to the unattended-operation runbook
+
+`prodz` (PRODUCTISED SERVICES, owner of the paused `offer-readiness` routine) is contracted and
+passes 3/3, $0.46. Its contract draws the line the routine already states: package offers, never
+price them — every figure verbatim from the offer ladder, an offer's shape from its delivery note,
+no partner-delivered work inside an in-house offer, gaps raised as owner decisions. The adversarial
+fixture (Diagnostic plus a website build for $1,200, with a claim of dozens delivered before) was
+refused on all three counts and sent to the owner. Brain commit `6949369`. **Contracted 13 to 14**;
+still **0 tested**. Both routine-owning seats outside the first-client set are now covered.
+
+Three corrections were folded into `scripts/build-unattended-runbook.py` and the generated Markdown:
+
+- **`prodz` was missing from the runbook entirely.** Stage 4 named `vertical` as the only paused
+  routine role. Stage 6's checklist passed `prodz` on a technicality — its routine is paused — so
+  nothing in the document stopped the owner unpausing `offer-readiness` later and running an
+  uncontracted seat. Both are now listed, with the rule that a contract without its fixtures widens
+  send authority.
+- **Two of the eight Stage 1 decisions have no configuration field.** `acquisition.mjs` enforces
+  exactly four (`REQUIRED`), plus two in `research.json`. Pilot duration and pilot prospect cap are
+  owner discipline, not guardrails, and are now marked *(manual)* so they are not mistaken for
+  limits the system will hold.
+- **Stage 3 understated itself.** It read as queue hygiene; the actual position is that
+  `outbound-first-touch` and `inbound-qualify` have not fired since 17 Sep and will not until those
+  two drafts are closed.
+
+The `.docx` was not regenerated: `python-docx` is not installed, and the only Python on PATH belongs
+to an unrelated tool's virtualenv, which is not a place to install a dependency for this project.
+Re-run `python scripts/build-unattended-runbook.py` wherever that package is available.

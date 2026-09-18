@@ -264,3 +264,24 @@ Three corrections were folded into `scripts/build-unattended-runbook.py` and the
 The `.docx` was not regenerated: `python-docx` is not installed, and the only Python on PATH belongs
 to an unrelated tool's virtualenv, which is not a place to install a dependency for this project.
 Re-run `python scripts/build-unattended-runbook.py` wherever that package is available.
+
+## Same pass — runbook preflight (the parts an agent may do)
+
+Stage 5 Day 0 backup taken to `backups/2026-09-18-pre-pilot/`: task state, both routine files,
+office state, the acquisition and research configs, and a full `git bundle` of the brain repository.
+Rollback IDs are in `COMMITS.txt` — source `eae3dc6` on `reliability-handoff`, brain `6949369`.
+
+Stage 6 preinstallation checks, read-only, all passing:
+
+- Port 4520 has no listener; the office is stopped.
+- `data/office.lock` is absent, so the last shutdown released it cleanly.
+- **Every routine-owning seat is contracted** — enabled: `pros` (x2), `ilm`, `iggy`, `ceo`;
+  paused: `vertical`, `prodz`. This was not true before tonight.
+- `acquisition.active` and `research.active` are both `false`, matching the owner's recorded position.
+- Gates A and B pass on this exact candidate (97/97, 38/38, 7/7).
+
+Everything else in the runbook is owner authority and was not touched: the six limits (Stage 1),
+connector authorisation (Stage 2), cancelling the two stale drafts and reading the Instagram draft
+(Stage 3), the fourteen seat reviews (Stage 4), the pilot including its first real send (Stage 5),
+and installing autostart (Stage 6). The runbook says an agent must not record a review on the
+owner's behalf, and none was.

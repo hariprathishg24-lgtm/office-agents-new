@@ -323,3 +323,20 @@ points somewhere real.
 the brain repository (refused as a shared-resource change). Stage 3's cancellations need the office
 running; hand-editing `data/tasks.json` instead would be worse than the thing being refused, and was
 not done.
+
+## 19 September 2026 — the runbook .docx is no longer stale
+
+The generated `.docx` still carried every error the Markdown had already been corrected for: 13
+contracted seats, `prodz` absent, "two of the five enabled routines", and the two pilot values
+presented as though the system enforced them. Anyone opening the Word file rather than the Markdown
+got the wrong document.
+
+`python-docx` was installed into a throwaway virtualenv in this session's scratchpad rather than
+into the hermes-agent venv that owns `python` on PATH, and the generator was re-run from there. The
+rebuilt file was then read back and checked programmatically: `prodz` present, "Four of the five
+enabled routines" present, 14 contracted, the *(manual)* markers present, the
+`readiness.requireForOutbound` rule present, and both stale phrasings absent. Seven checks, all
+passing.
+
+To rebuild it again without that venv, any Python with `python-docx` will do:
+`python scripts/build-unattended-runbook.py`.

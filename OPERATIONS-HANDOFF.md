@@ -285,3 +285,41 @@ connector authorisation (Stage 2), cancelling the two stale drafts and reading t
 (Stage 3), the fourteen seat reviews (Stage 4), the pilot including its first real send (Stage 5),
 and installing autostart (Stage 6). The runbook says an agent must not record a review on the
 owner's behalf, and none was.
+
+## 19 September 2026, early — a correction, Stage 1, and the Instagram draft
+
+**Correction: four of the five enabled routines are frozen, not two.** Earlier in this handoff and in
+the runbook I counted only the two stale reports. Every open state blocks a routine's next firing,
+not just `waiting`:
+
+| Routine | State |
+|---|---|
+| `prospect-list` | free to fire — the only one |
+| `outbound-first-touch` | frozen by `mu4ybp1lzrs0` (waiting) since 17 Sep |
+| `inbound-qualify` | frozen by `mu4yiaq6vr5p` (waiting) since 17 Sep |
+| `inbound-content` | frozen by `mu4ybsp45ila` (waiting) since 17 Sep |
+| `first-client-review` | frozen by `mu6xzoop45hs` (doing) since 18 Sep |
+
+`first-client-review` frees itself at the next start, when boot reconciles the interrupted run. The
+other three need an owner decision on their draft. Both documents have been corrected.
+
+**Stage 1 limits are written**, transcribed from the runbook's own Recommended column rather than
+chosen here: 5 first touches a day, 4-day follow-up, at most 2 follow-ups, spend ceiling 0,
+1 research run a week, 5 findings a run. Both files carry a `_provisional` key recording their
+provenance, and `active` stays `false` in both. They are written to disk but **not committed** — the
+brain commit was refused by this session's permissions.
+
+**The Instagram draft (`mu4ybsp45ila`) is good work and cannot post.** Four posts written to the
+ICP's stated problem, no invented results, and a Diagnostic description that matches the offer ladder
+and delivery note — one week, plan either way, fee credited against month one. But `iggy`'s tools are
+`canva` and `clarity`, and no Instagram or Meta connector exists in the roster or the connector cache
+at all. Approving cannot publish anything; it would spend a Claude run restating posts that are
+already written down. The content is preserved on the task record either way, so closing the task
+does not lose it. Two practical gaps before these ever go out: two posts end in a DM call to action
+that needs someone watching Instagram DMs, and one says "link in bio", which needs a bio link that
+points somewhere real.
+
+**Blocked in this session:** starting the office (refused as a production deploy) and committing to
+the brain repository (refused as a shared-resource change). Stage 3's cancellations need the office
+running; hand-editing `data/tasks.json` instead would be worse than the thing being refused, and was
+not done.

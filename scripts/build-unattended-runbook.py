@@ -122,8 +122,8 @@ table(['Area','Verified state','Remaining requirement'],[
     ('Roles','119 seats; 53 generic, 52 briefed, 14 contracted, 0 tested.','Owner reviews the 14 contracted seats before they run unattended.'),
     ('Task store','29 tasks: 18 done, 7 cancelled, 3 waiting, 1 interrupted.','Resolve two stale tasks, inspect the Instagram draft and reconcile the interrupted CEO run.'),
     ('Routines','Five enabled and two paused.','Confirm every enabled routine has a tested owner role and acceptable schedule.'),
-    ('Acquisition','Inactive; four limits unset.','Set limits and connect prospect research before activation.'),
-    ('Research','Inactive; two limits unset.','Set cadence and findings limit before activation.'),
+    ('Acquisition','Inactive; four limits written from this runbook, awaiting owner confirmation.','Owner confirms the numbers and authorises Apollo before activation.'),
+    ('Research','Inactive; cadence and findings limit written from this runbook, awaiting owner confirmation.','Owner confirms the numbers before activation.'),
     ('Service','Office down; autostart not registered.','Complete pilot, then verify scheduled startup and crash recovery.'),
     ('Connectors','Apollo needs authorization; Zoho reports an OAuth scope mismatch.','Authorize only required connectors and verify least privilege.'),
 ], [1.25,2.45,3.25])
@@ -175,7 +175,7 @@ doc.add_paragraph('Never paste credentials into company notes, task text, screen
 page_break()
 doc.add_heading('4  Stage 3  Clear the queue safely', level=1)
 doc.add_paragraph('Open work affects routine scheduling. Resolve it before the pilot so old drafts cannot be mistaken for fresh work.')
-doc.add_paragraph('This is not housekeeping. A routine has at most one open run, and "waiting" counts as open, so outbound-first-touch and inbound-qualify have not fired since 17 September and will not fire again until their two drafts are closed. Two of the five enabled routines are dead until Stage 3 is done. Both drafts are "nothing found" reports written about twenty minutes before the office began filing such drafts as finished reports, and neither carries a TO: recipient: cancelling costs no Claude run, while approving spends one carrying out an outbound step that has no recipient and nothing to send.')
+doc.add_paragraph('This is not housekeeping. A routine has at most one open run, and every open state counts, "waiting" and "doing" alike. Four of the five enabled routines are frozen right now: outbound-first-touch, inbound-qualify and inbound-content by their waiting drafts since 17 September, and first-client-review by the CEO run interrupted on 18 September. Only prospect-list can still fire. first-client-review frees itself at the next start, when boot reconciles the interrupted run; the other three need an owner decision on each draft. The two stale reports carry no TO: recipient, so cancelling costs no Claude run while approving spends one on an outbound step with nothing to send. The Instagram draft is a different case: it is real content, and iggy has no Instagram or Meta connector at all, so approving it cannot post anything and would only spend a run restating the posts already drafted.')
 table(['Record','Required disposition','Evidence'],[
     ('mu4ybp1lzrs0','Cancel the stale first-touch draft after confirming nothing was sent.','Task state cancelled; history records the owner action.'),
     ('mu4yiaq6vr5p','Cancel the stale inbound qualification draft after confirming nothing was sent.','Task state cancelled; history records the owner action.'),

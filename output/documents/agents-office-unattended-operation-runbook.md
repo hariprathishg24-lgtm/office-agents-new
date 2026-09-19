@@ -31,8 +31,8 @@ Safe unattended operation allows agents to perform approved read-only and local 
 | Roles | 119 seats: 53 generic, 52 briefed, 14 contracted, 0 tested. | Owner reviews the 14 contracted seats before unattended use. |
 | Task store | 29 tasks: 18 done, 7 cancelled, 3 waiting, 1 interrupted. | Resolve stale tasks, inspect the Instagram draft and reconcile the CEO run. |
 | Routines | Five enabled and two paused. | Confirm every enabled routine has a tested role owner and acceptable schedule. |
-| Acquisition | Inactive; four limits unset. | Set limits and connect prospect research before activation. |
-| Research | Inactive; two limits unset. | Set cadence and findings limit before activation. |
+| Acquisition | Inactive; four limits written from this runbook, awaiting owner confirmation. | Owner confirms the numbers and authorises Apollo before activation. |
+| Research | Inactive; cadence and findings limit written from this runbook, awaiting owner confirmation. | Owner confirms the numbers before activation. |
 | Service | Office down; autostart not registered. | Complete pilot, then verify scheduled startup and recovery. |
 | Connectors | Apollo needs authorization; Zoho has an OAuth scope mismatch. | Authorize only required connectors and verify least privilege. |
 
@@ -87,7 +87,7 @@ Never place credentials in company notes, task text, screenshots, logs, contract
 
 ## 4 Stage 3 Clear the queue safely
 
-This is not housekeeping. A routine has at most one open run and `waiting` counts as open, so **`outbound-first-touch` and `inbound-qualify` have not fired since 17 September** and will not until their two drafts are closed — two of the five enabled routines are dead. Both are "nothing found" reports written about twenty minutes before the office began filing such drafts as finished reports, and neither carries a `TO:` recipient: cancelling costs no Claude run, approving spends one on an outbound step with nothing to send.
+This is not housekeeping. A routine has at most one open run, and every open state counts, "waiting" and "doing" alike. Four of the five enabled routines are frozen right now: `outbound-first-touch`, `inbound-qualify` and `inbound-content` by their waiting drafts since 17 September, and `first-client-review` by the CEO run interrupted on 18 September. Only `prospect-list` can still fire. `first-client-review` frees itself at the next start, when boot reconciles the interrupted run; the other three need an owner decision on each draft. The two stale reports carry no `TO:` recipient, so cancelling costs no Claude run while approving spends one on an outbound step with nothing to send. The Instagram draft is a different case: it is real content, and `iggy` has no Instagram or Meta connector at all, so approving it cannot post anything and would only spend a run restating the posts already drafted.
 
 | Record | Required disposition | Evidence |
 |---|---|---|

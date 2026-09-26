@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Origin Pixel Solutions · Retainer Operations</title>
+<style>
+:root{font-family:Inter,system-ui,sans-serif;color:#edf3f1;background:#101a1c;font-size:15px;color-scheme:dark}*{box-sizing:border-box}body{margin:0}header{border-bottom:1px solid #324347;padding:20px 5%;display:flex;justify-content:space-between;gap:20px;align-items:center}a{color:#a4deca}header strong{letter-spacing:.06em}nav{display:flex;gap:20px}main{max-width:1320px;margin:auto;padding:40px 5%}h1{font-size:clamp(32px,5vw,58px);line-height:1.05;letter-spacing:-.045em;margin:16px 0}h2{font-size:20px;margin:0 0 14px}p{line-height:1.6;color:#b5c7c6}.eyebrow{font-size:12px;letter-spacing:.15em;color:#94d8b9;text-transform:uppercase}.intro{max-width:760px}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:30px 0}.metric,.panel,article{background:#19272a;border:1px solid #34474a;border-radius:16px;padding:22px}.metric b{font-size:30px;display:block;margin-bottom:5px}.metric span,small{color:#b5c7c6}.panels{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin:24px 0}.toolbar{display:flex;gap:12px;flex-wrap:wrap;margin:26px 0}input,select,textarea{font:inherit;background:#101a1c;color:#edf3f1;border:1px solid #50686b;border-radius:9px;padding:12px}input{flex:1;min-width:180px}textarea{width:100%;min-height:95px;resize:vertical}button{font:inherit;border:1px solid #57736e;border-radius:9px;padding:10px 15px;cursor:pointer;background:#203634;color:#e8f8f1}button.primary{background:#a6e3c8;color:#12251d;border-color:#a6e3c8}button:disabled{opacity:.5;cursor:wait}button:focus-visible,a:focus-visible{outline:3px solid #e4c68e;outline-offset:3px}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}article{display:flex;flex-direction:column;gap:12px}article h3{font-size:20px;margin:0}article p{margin:0;font-size:14px}article .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:auto}.badge{align-self:flex-start;background:#2a3c40;color:#cadbd9;padding:5px 9px;border-radius:7px;font-size:12px}.active{background:#294b3e;color:#afeacb}details{font-size:13px;line-height:1.5}summary{cursor:pointer;color:#addbc9}details p{margin:10px 0}#message{padding:12px 0;min-height:44px;color:#f0d8a7}ul{padding-left:18px;line-height:1.65}li{margin-bottom:9px}.result{white-space:pre-wrap;overflow-wrap:anywhere;max-height:280px;overflow:auto;font-size:13px;color:#d5e2dd}footer{margin:36px 0;color:#9dafb0;font-size:13px}.quiet{font-size:13px}label{display:block;margin-bottom:8px}#connection{color:#c7ddcf}.empty{grid-column:1/-1;padding:25px}@media(max-width:1000px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:650px){.grid,.panels{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}header{align-items:flex-start;flex-direction:column}main{padding-top:25px}}
+:root{background:#030f32;color:#f7f9ff}header{background:#04133e;border-color:#193c72}a{color:#8ebaff}.eyebrow{color:#75aaff}.metric,.panel,article{background:#081b43;border-color:#21416c}p,small,.metric span{color:#bbc9e2}input,select,textarea{background:#041337;border-color:#36598c;color:#f7f9ff}button{background:#102c57;border-color:#3f6595}button.primary{background:#1677ff;border-color:#1677ff;color:white}.badge{background:#173360;color:#c4d7fa}.active{background:#143f67;color:#a8dcff}summary{color:#9fc5ff}header strong{font-size:14px}#connection{color:#bbd7ff}.brand-services{color:#8aaff6;font-size:12px;letter-spacing:.08em;margin-top:6px}.result{color:#d9e5fc}
+</style>
+</head>
+<body>
+<header><div><strong>ORIGIN PIXEL SOLUTIONS</strong><div class="brand-services">DESIGN · DEVELOPMENT · MARKETING · AUTOMATION</div></div><nav><a href="/">Office</a><a href="/ops">Approvals & operations</a></nav></header>
+<main>
+<div class="intro"><span class="eyebrow">Your retainer-based digital-services business</span><h1>Keep clients growing.<br>Keep your time.</h1><p>Plan recurring delivery, protect scope, prepare renewals and see which accounts need attention. Your office prepares the next move from the business records available to it.</p><div id="connection" role="status">Connecting to your office…</div></div>
+<div class="metrics"><div class="metric"><b id="count">—</b><span>Prepared workflows</span></div><div class="metric"><b id="scheduled">—</b><span>Enabled schedules</span></div><div class="metric"><b id="running">—</b><span>Active workflow tasks</span></div><div class="metric"><b id="decisions">—</b><span>Office decisions</span></div></div>
+<div class="panels"><section class="panel"><h2>Give the next run context</h2><label for="context">Client, project, question, or relevant facts</label><textarea id="context" placeholder="For example: prepare onboarding for the website project described in our client notes."></textarea><p class="quiet">Used only for “Prepare now.” Scheduled runs use your approved business records. Do not paste passwords or payment credentials.</p></section><section class="panel"><h2>How this works</h2><p>All workflows start paused. Inspect the inputs, prepare a report, then enable the schedule when its information is available.</p><p class="quiet">Reports do not send messages, spend money, change calendars or update customer systems. External execution is a separate, explicitly authorized task in your office. The server must be running for schedules to fire; times use this computer’s timezone.</p><button id="pause">Pause enabled solo schedules</button></section></div>
+<div id="message" role="status" aria-live="polite"></div>
+<div class="toolbar"><input id="search" aria-label="Search workflows" placeholder="Search workflows…"><select id="category" aria-label="Workflow area"><option value="">All business areas</option></select></div>
+<section id="catalog" class="grid" aria-label="Workflow catalogue"></section>
+<div class="panels"><section class="panel"><h2>Recent workflow work</h2><div id="recent">Loading…</div></section><section class="panel"><h2>Decisions waiting for you</h2><ul id="pending"></ul><a href="/ops">Review decisions in operations →</a></section></div>
+<footer>Prepared workflows are not proof of working integrations. Missing records and unavailable tools must be reported by each run. Start with one workflow and check its result before enabling more schedules.</footer>
+</main>
+<script type="module">
+const $=id=>document.getElementById(id);
+let catalogue={workflows:[],groups:[]}, routines=[], tasks=[], pending={items:[]}, busy=false;
+const text=(tag,value,cls)=>{const el=document.createElement(tag);el.textContent=value;if(cls)el.className=cls;return el};
+async function api(url,body){const response=await fetch(url,body===undefined?{}:{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});const data=await response.json();if(!response.ok)throw Error(data.error||'Request failed');return data}
+function announce(value){$('message').textContent=value}
+async function action(fn){if(busy)return;busy=true;render();try{await fn();await refresh()}catch(error){announce(error.message)}finally{busy=false;render()}}
+function render(){
+ $('count').textContent=catalogue.workflows.length;
+ const ids=new Set(catalogue.workflows.map(w=>w.id));
+ $('scheduled').textContent=routines.filter(r=>ids.has(r.id)&&!r.paused).length;
+ const related=tasks.filter(t=>ids.has(t.goal)||ids.has(t.routine));
+ $('running').textContent=related.filter(t=>['next','doing','blocked','review'].includes(t.state)).length;
+ $('decisions').textContent=pending.count??pending.items.length;
+ $('pause').disabled=busy||!routines.some(r=>ids.has(r.id)&&!r.paused);
+ const list=$('catalog');list.replaceChildren();
+ const query=$('search').value.toLowerCase(),category=$('category').value;
+ for(const w of catalogue.workflows.filter(w=>(!category||w.group===category)&&`${w.title} ${w.inputs} ${w.output}`.toLowerCase().includes(query))){
+  const r=routines.find(r=>r.id===w.id),card=document.createElement('article');
+  card.append(text('span',r?(r.paused?'Schedule paused':'Schedule enabled'):'Not installed','badge'+(r&&!r.paused?' active':'')),text('h3',w.title),text('p',w.output));
+  const detail=document.createElement('details');detail.append(text('summary','Inputs and procedure'),text('p','Needs: '+w.inputs),text('p',w.procedure),text('p','Schedule: '+(r?.desc||'Available after installation')+(r?.nextAt?' · Next: '+new Date(r.nextAt).toLocaleString():'')));
+  card.append(detail);const actions=text('div','','actions');
+  const run=text('button','Prepare now','primary');run.disabled=busy;run.onclick=()=>action(async()=>{const extra=$('context').value.trim();const t=await api('/api/solo/prepare',{workflow:w.id,context:extra});announce('Queued: '+w.title+'. Task '+t.id+'. Check its result below; missing inputs will be reported.');});
+  const toggle=text('button',r?(r.paused?'Enable schedule':'Pause schedule'):'Not installed');toggle.disabled=busy||!r;toggle.onclick=()=>action(async()=>{await api('/api/routines/'+encodeURIComponent(w.id)+(r.paused?'/resume':'/pause'),{});announce(w.title+': schedule '+(r.paused?'enabled':'paused')+'.');});actions.append(run,toggle);card.append(actions);list.append(card);
+ }
+ if(!list.children.length)list.append(text('p','No workflows match your search.','empty'));
+ $('recent').replaceChildren();
+ for(const t of related.slice().reverse().slice(0,8)){const d=document.createElement('details');d.append(text('summary',t.title+' · '+(t.error?'failed':t.state)),text('pre',t.result||'No result yet.','result'));$('recent').append(d)}
+ if(!related.length)$('recent').append(text('p','No solo workflow has run yet. Choose “Prepare now” to start.'));
+ $('pending').replaceChildren();for(const p of pending.items.slice(0,6))$('pending').append(text('li',p.decision||p.title));if(!pending.items.length)$('pending').append(text('li','No decisions reported by the office.'));
+}
+async function refresh(){const [r,t,p]=await Promise.all([api('/api/routines'),api('/api/tasks'),api('/api/pending')]);routines=Array.isArray(r)?r:r.routines||[];tasks=Array.isArray(t)?t:t.tasks||[];pending=p;render();$('connection').textContent='Connected · report and draft workflows';}
+$('search').oninput=render;$('category').onchange=render;
+$('pause').onclick=()=>action(async()=>{const ids=new Set(catalogue.workflows.map(w=>w.id));for(const r of routines.filter(r=>ids.has(r.id)&&!r.paused))await api('/api/routines/'+encodeURIComponent(r.id)+'/pause',{});announce('Solo schedules paused. Tasks already running remain visible in operations.');});
+try{catalogue=await api('/api/solo');for(const g of catalogue.groups){const o=text('option',g.title);o.value=g.id;$('category').append(o)}await refresh();}catch(e){$('connection').textContent='Office connection unavailable';announce(e.message)}
+setInterval(()=>{if(!busy)refresh().catch(e=>{$('connection').textContent='Refresh unavailable — displayed data may be outdated';announce(e.message)})},15000);
+</script>
+</body></html>

@@ -1,0 +1,72 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { chromium } from 'playwright-core';
+import { scratch, startOffice, ROOT } from './helpers.mjs';
+const temp=scratch('business-ui');let office,browser;
+try{
+ office=await startOffice({brain:temp.brain,data:temp.data});
+ try{browser=await chromium.launch()}catch{browser=await chromium.launch({channel:'chrome'})}
+ const page=await browser.newPage({viewport:{width:1440,height:1050}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
+ await page.emulateMedia({reducedMotion:'reduce'});
+ await page.goto(office.base+'/solo');await page.getByRole('button',{name:'Add your first client',exact:true}).waitFor();
+ await page.getByRole('button',{name:'Set up business',exact:true}).click();
+ await page.getByLabel('Weekly capacity in hours (optional)').fill('35');await page.getByLabel('Working hours and protected time').fill('Weekdays 9–5; Wednesday mornings protected');
+ await page.locator('#save').click();await page.locator('#modal').waitFor({state:'hidden'});
+ await page.getByRole('button',{name:'Add your first client',exact:true}).click();
+ await page.getByLabel('Client name',{exact:true}).fill('QA Client');await page.getByLabel('Retainer fee per contract period').fill('25000');
+ await page.getByLabel('Included hours (optional)',{exact:true}).fill('10');await page.getByLabel('Relationship stage').selectOption('Active');
+ await page.getByLabel('Agreed scope, exclusions, revisions and billing rules').fill('Design and development. Ten hours per period. Two revision rounds. No rollover.');
+ await page.locator('#save').click();await page.locator('#modal').waitFor({state:'hidden'});
+ await page.getByRole('button',{name:'Open period',exact:true}).click();
+ await page.getByLabel('Start date',{exact:true}).fill('2026-09-15');await page.getByLabel('End date',{exact:true}).fill('2026-10-14');
+ await page.locator('#save').click();await page.locator('#modal').waitFor({state:'hidden'});
+ await page.getByRole('button',{name:'Add request',exact:true}).first().click();
+ await page.getByLabel('Request title').fill('Design landing page');await page.locator('select[name=scope]').selectOption('Included');await page.getByLabel('Estimated hours',{exact:true}).fill('3');
+ await page.locator('#save').click();await page.locator('#modal').waitFor({state:'hidden'});
+ await page.getByRole('button',{name:'Delivery',exact:true}).click();await page.getByRole('button',{name:'Open request',exact:true}).click();
+ await page.getByRole('button',{name:'Submit deliverable',exact:true}).click();await page.getByLabel('Link or file reference for the exact version').fill('Fixture deliverable v1');
+ await page.locator('#save').click();await page.locator('#modal').waitFor({state:'hidden'});
+ await page.getByRole('button',{name:'Open request',exact:true}).click();await page.getByRole('button',{name:'Record approval',exact:true}).click();
+ await page.getByLabel('Who approved this version?').fill('Fixture contact');await page.getByLabel('Approval evidence: message, date, or record reference').fill('Recorded fixture approval');
+ await page.locator('#save').click();await page.locator('#modal').waitFor({state:'hidden'});
+ await page.getByRole('button',{name:'Open request',exact:true}).click();await page.getByRole('button',{name:'Update status',exact:true}).click();
+ await page.locator('select[name=status]').selectOption('Delivered');await page.locator('#save').click();await page.locator('#modal').waitFor({state:'hidden'});
+ await page.getByRole('button',{name:'Plan & requests',exact:true}).click();await page.getByRole('button',{name:'Prepare invoice record',exact:true}).click();
+ await page.getByLabel('Invoice reference').fill('QA-001');await page.getByLabel('Due date',{exact:true}).fill('2026-10-14');await page.locator('#save').click();await page.locator('#modal').waitFor({state:'hidden'});
+ await page.getByRole('button',{name:'Agreement & billing',exact:true}).click();await page.getByRole('button',{name:'Update record',exact:true}).click();
+ await page.getByLabel('Actual status').selectOption('Issued');await page.getByLabel('Evidence: invoice link, payment reference, or dispute details').fill('Issued externally in fixture');await page.locator('#save').click();await page.locator('#modal').waitFor({state:'hidden'});
+ await page.getByRole('button',{name:'Update record',exact:true}).click();await page.getByLabel('Actual status').selectOption('Paid');await page.getByLabel('Evidence: invoice link, payment reference, or dispute details').fill('Fixture payment reference');await page.locator('#save').click();await page.locator('#modal').waitFor({state:'hidden'});
+ await page.getByRole('button',{name:'AI & reports',exact:true}).click();await page.getByRole('button',{name:'Prepare with AI',exact:true}).click();
+ await page.locator('#save').click();await page.locator('#modal').waitFor({state:'hidden'});
+ const created=(await office.tasks()).find(t=>t.businessClient);assert.ok(created);await office.until(created.id,t=>t.state==='done');
+ await page.getByRole('button',{name:'Plan & requests',exact:true}).click();await page.getByRole('button',{name:'Close period',exact:true}).click();await page.getByLabel('Period summary and next-period considerations').fill('Fixture cycle completed');await page.locator('#save').click();await page.locator('#modal').waitFor({state:'hidden'});
+ await page.reload();await page.getByRole('button',{name:'Clients',exact:true}).click();await page.getByRole('button',{name:'QA Client',exact:true}).click();
+ // An accidental Escape must not silently lose edits.
+ await page.getByRole('button',{name:'Edit client and agreement',exact:true}).click();await page.getByLabel('Client name',{exact:true}).fill('Unsaved change');
+ await page.keyboard.press('Escape');await page.getByRole('button',{name:'Keep editing',exact:true}).waitFor();
+ await page.getByRole('button',{name:'Keep editing',exact:true}).click();assert.equal(await page.getByLabel('Client name',{exact:true}).inputValue(),'Unsaved change');
+ await page.getByRole('button',{name:'Close dialog',exact:true}).click();await page.getByRole('button',{name:'Discard changes',exact:true}).click();
+ assert.equal((await office.api('GET','/api/business')).body.clients[0].name,'QA Client');
+ // A failed save keeps the entered values and displays a recoverable error.
+ await page.getByRole('button',{name:'Edit client and agreement',exact:true}).click();await page.getByLabel('Client name',{exact:true}).fill('Retained after network failure');
+ await page.route('**/api/business',route=>route.request().method()==='POST'?route.abort():route.continue());
+ await page.locator('#save').click();await page.locator('#form-error').getByText('Cannot reach the office.',{exact:false}).waitFor();
+ assert.equal(await page.getByLabel('Client name',{exact:true}).inputValue(),'Retained after network failure');await page.unroute('**/api/business');
+ await page.getByRole('button',{name:'Close dialog',exact:true}).click();await page.getByRole('button',{name:'Discard changes',exact:true}).click();
+ const d=(await office.api('GET','/api/business')).body;assert.equal(d.periods[0].closed,true);assert.equal(d.requests[0].status,'Delivered');assert.equal(d.invoices[0].status,'Paid');
+ const out=path.join(ROOT,'output','business-verification');fs.mkdirSync(out,{recursive:true});
+ await page.getByRole('button',{name:'Day mode',exact:true}).click();
+ assert.equal(await page.locator('html').getAttribute('data-theme'),'light');
+ await page.screenshot({path:path.join(out,'desktop.png'),fullPage:false});
+ await page.getByRole('button',{name:'Night mode',exact:true}).click();
+ assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()),'#18191b');
+ await page.screenshot({path:path.join(out,'night.png'),fullPage:false});
+ await page.reload();await page.getByRole('button',{name:'Night mode',exact:true}).waitFor();
+ assert.equal(await page.getByRole('button',{name:'Night mode',exact:true}).getAttribute('aria-pressed'),'true');
+ await page.getByRole('button',{name:'Compact layout',exact:true}).click();await page.reload();
+ await page.getByRole('button',{name:'Compact layout',exact:true}).waitFor();assert.equal(await page.locator('html').getAttribute('data-density'),'compact');
+ await page.setViewportSize({width:390,height:844});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));await page.screenshot({path:path.join(out,'mobile.png'),fullPage:false});
+ assert.deepEqual(errors,[]);console.log('PASS: setup, client, period, scoped request, deliverable, approval, delivery, invoice, payment, CLI task, close period, reload persistence and mobile layout.');
+}finally{await browser?.close();await office?.stop();temp.cleanup()}
+
